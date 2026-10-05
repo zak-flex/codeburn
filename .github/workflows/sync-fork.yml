@@ -1,0 +1,70 @@
+name: Sync fork with upstream
+
+# Keeps this fork's `main` in sync with upstream (getagentseal/codeburn) without
+# manual "Sync fork" clicks on GitHub. Runs on a schedule (and on demand via
+# workflow_dispatch) and merges upstream's latest commits into this fork's
+# `main`, preserving this fork's own commits (the LiteLLM provider work) — a
+# plain merge, so upstream changes and fork changes both survive.
+#
+# Notes:
+# - A fork's default `GITHUB_TOKEN` cannot push to its own default branch in a
+#   way that retriggers workflows, but it CAN push here because `main` is
+#   unprotected (no branch protection), and scheduled runs get read+write
+#   scopes. If you later add branch protection to `main`, give this workflow a
+#   PAT with `repo` scope as `SYNC_PAT` instead.
+# - If the merge conflicts (upstream touched the same lines the fork changed),
+#   the run fails and you resolve manually once; the next run resumes cleanly.
+# - `github.token` is used for the git auth so the push is attributed to the
+#   GitHub Actions bot, not a person.
+
+on:
+  schedule:
+    # Daily 06:00 UTC. Adjust the cron to taste.
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/getagentseal/codeburn.git
+          git fetch upstream main
+
+      - name: Merge upstream main into fork main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git merge --no-edit upstream/main >/tmp/merge.log 2>&1; then
+            echo "::notice::Upstream is already up to date, or merged cleanly."
+            cat /tmp/merge.log
+          else
+            echo "::error::Merge with upstream/main failed (conflicts). Resolve once and re-run, or run manually."
+            cat /tmp/merge.log
+            exit 1
+          fi
+
+      - name: Push merged main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # actions/checkout already persisted the ambient GITHUB_TOKEN into
+          # the local credential helper, so a plain push authenticates as the
+          # GitHub Actions bot without embedding a secret in the URL.
+          git push origin main
+          echo "::notice::Fork main synced with upstream."
