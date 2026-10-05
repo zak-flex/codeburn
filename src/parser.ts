@@ -2676,6 +2676,7 @@ export const REPORTED_COST_PROVIDERS: ReadonlySet<string> = new Set([
   'quickdesk',
   'cline-cli',
   'omp',
+  'litellm',
 ])
 
 function providerCallToCachedCall(call: ParsedProviderCall): CachedCall {

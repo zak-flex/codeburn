@@ -252,6 +252,6 @@ it('holds the reported-cost provider set to its documented membership', async ()
   // keep being re-priced from tokens. Pinned so that pairing stays deliberate.
   expect([...REPORTED_COST_PROVIDERS].sort()).toEqual([
     'antigravity', 'cline-cli', 'codewhale', 'devin', 'hermes',
-    'kiro', 'mistral-vibe', 'omp', 'quickdesk', 'vercel-gateway',
+    'kiro', 'litellm', 'mistral-vibe', 'omp', 'quickdesk', 'vercel-gateway',
   ])
 })

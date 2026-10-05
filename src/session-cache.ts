@@ -335,6 +335,13 @@ export const PROVIDER_ENV_VARS: Record<string, string[]> = {
   // !readOnly), so an undeclared credential would keep serving the previous
   // account's usage after a swap — the exact #920 defect.
   'vercel-gateway': ['AI_GATEWAY_API_KEY', 'VERCEL_OIDC_TOKEN'],
+  // The proxy base URL and credential are deliberate user overrides and MUST
+  // move the fingerprint, exactly like the gateway credential above: a
+  // read-only refresh serves the cached report straight from the section, so
+  // an undeclared swap would keep serving the previous endpoint/account's
+  // usage after a change. LITELLM_USER_ID likewise changes whose spend the
+  // parse reads.
+  litellm: ['LITELLM_BASE_URL', 'LITELLM_API_KEY', 'LITELLM_KEY', 'LITELLM_MASTER_KEY', 'LITELLM_USER_ID'],
 }
 
 // Names of providers whose cache entries are never evicted when source files

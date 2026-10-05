@@ -70,6 +70,12 @@ const FILE_PROVIDERS: Record<string, string[]> = {
   // the cached report (parser.ts:2875/2888) cannot keep serving the previous
   // account's usage after a swap.
   'vercel-gateway.ts': ['vercel-gateway'],
+  // Lazy network provider; its credential/base read-vars are declared in
+  // PROVIDER_ENV_VARS (session-cache.ts) — LITELLM_BASE_URL, LITELLM_API_KEY,
+  // LITELLM_KEY, LITELLM_MASTER_KEY and LITELLM_USER_ID all change which
+  // endpoint/account a parse reads, so a swap must invalidate the cached
+  // section.
+  'litellm.ts': ['litellm'],
 }
 
 // ── Allowlisted reads ────────────────────────────────────────────────────

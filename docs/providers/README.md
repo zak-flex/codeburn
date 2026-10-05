@@ -57,6 +57,7 @@ For the architectural picture, see `../architecture.md`.
 | [Vercel AI Gateway](vercel-gateway.md) | REST API | `src/providers/vercel-gateway.ts` | `tests/providers/vercel-gateway.test.ts` |
 | [ZCode](zcode.md) | SQLite (usage) + z.ai quota endpoint (plan) | `src/providers/zcode.ts`, `src/quota/zcode.ts` | `tests/providers/zcode.test.ts`, `tests/quota-zcode.test.ts` |
 | [Zed](zed.md) | SQLite | `src/providers/zed.ts` | `tests/providers/zed.test.ts` |
+| [LiteLLM Proxy](litellm.md) | REST API | `src/providers/litellm.ts` | `tests/providers/litellm.test.ts` |
 
 ### Shared
 

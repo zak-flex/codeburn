@@ -2100,6 +2100,67 @@ program
   })
 
 program
+  .command('litellm')
+  .description('Show or configure the LiteLLM Proxy connection. The base URL and API key can be stored in config.json so the macOS menu bar (a GUI app that does not inherit your shell env) can read your LiteLLM usage without env vars. Env vars (LITELLM_BASE_URL, LITELLM_KEY / LITELLM_API_KEY / LITELLM_MASTER_KEY, LITELLM_USER_ID) always override the stored values.')
+  .option('--base-url <url>', 'Set the LiteLLM proxy base URL (e.g. https://litellm.example.com)')
+  .option('--api-key <key>', 'Set the LiteLLM API key used to read spend')
+  .option('--user-id <id>', 'Optional: read spend for a specific proxy user')
+  .option('--clear', 'Remove the stored LiteLLM connection config')
+  .option('--format <format>', 'Output format: text, json', 'text')
+  .action(async (opts?: { baseUrl?: string; apiKey?: string; userId?: string; clear?: boolean; format?: string }) => {
+    const format = opts?.format ?? 'text'
+    assertFormat(format, ['text', 'json'], 'litellm')
+    const config = await readConfig()
+
+    if (opts?.clear) {
+      delete config.litellm
+      await saveConfig(config)
+      if (format === 'json') {
+        console.log(JSON.stringify({ litellm: null }, null, 2))
+        return
+      }
+      console.log('\n  LiteLLM connection removed. Set it again with: codeburn litellm --base-url <url> --api-key <key>\n')
+      return
+    }
+
+    if (opts?.baseUrl !== undefined || opts?.apiKey !== undefined || opts?.userId !== undefined) {
+      config.litellm = {
+        ...(config.litellm ?? {}),
+        ...(opts?.baseUrl !== undefined ? { baseUrl: opts.baseUrl.trim() } : {}),
+        ...(opts?.apiKey !== undefined ? { apiKey: opts.apiKey.trim() } : {}),
+        ...(opts?.userId !== undefined ? { userId: opts.userId.trim() } : {}),
+      }
+      await saveConfig(config)
+    }
+
+    const stored = config.litellm
+    if (format === 'json') {
+      console.log(JSON.stringify({
+        litellm: {
+          ...(stored?.baseUrl ? { baseUrl: stored.baseUrl } : {}),
+          // Never echo the key value back; the CLI output and config are both
+          // logs-adjacent, and the key is a live credential.
+          apiKeySet: Boolean(stored?.apiKey),
+          ...(stored?.userId ? { userId: stored.userId } : {}),
+        },
+      }, null, 2))
+      return
+    }
+
+    if (!stored?.baseUrl && !stored?.apiKey && !stored?.userId) {
+      console.log('\n  No LiteLLM connection configured.')
+      console.log(`  Config: ${getConfigFilePath()}`)
+      console.log('  Add one with: codeburn litellm --base-url <url> --api-key <key>\n')
+      return
+    }
+    console.log('\n  LiteLLM connection:')
+    if (stored?.baseUrl) console.log(`    Base URL: ${stored.baseUrl}`)
+    if (stored?.apiKey) console.log('    API key: <set>')
+    if (stored?.userId) console.log(`    User ID: ${stored.userId}`)
+    console.log(`  Config: ${getConfigFilePath()}\n`)
+  })
+
+program
   .command('plan [action] [id]')
   .description('Show or configure a subscription plan for overage tracking')
   .option('--format <format>', 'Output format: text or json', 'text')
