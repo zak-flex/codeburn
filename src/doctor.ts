@@ -164,7 +164,7 @@ const AMBIENT_ENV_VARS = new Set(['APPDATA', 'LOCALAPPDATA'])
 // credential is set is a useful diagnostic, but the value is a live secret.
 // Redact at collect time so BOTH the text render and the JSON report are
 // covered, and doctor can never leak a key into a bug report or a paste.
-const SECRET_ENV_VARS = new Set(['AI_GATEWAY_API_KEY', 'VERCEL_OIDC_TOKEN'])
+const SECRET_ENV_VARS = new Set(['AI_GATEWAY_API_KEY', 'VERCEL_OIDC_TOKEN', 'LITELLM_API_KEY', 'LITELLM_KEY', 'LITELLM_MASTER_KEY'])
 
 // ── Collect (pure, testable) ─────────────────────────────────────────────
 
