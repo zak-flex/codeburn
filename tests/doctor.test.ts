@@ -237,20 +237,25 @@ describe('collectDoctorReport - env override', () => {
   // neither the text render nor the JSON report can leak it (Ruling 2 of lane
   // 04). Table-driven over both, so a credential added to the set without a
   // redaction test fails here instead of leaking into a bug report.
-  for (const varName of ['AI_GATEWAY_API_KEY', 'VERCEL_OIDC_TOKEN']) {
+  for (const [varName, sibling, providerName, displayName] of [
+    ['AI_GATEWAY_API_KEY', 'VERCEL_OIDC_TOKEN', 'vercel-gateway', 'Vercel AI Gateway'],
+    ['VERCEL_OIDC_TOKEN', 'AI_GATEWAY_API_KEY', 'vercel-gateway', 'Vercel AI Gateway'],
+    ['LITELLM_API_KEY', 'LITELLM_KEY', 'litellm', 'LiteLLM'],
+    ['LITELLM_KEY', 'LITELLM_API_KEY', 'litellm', 'LiteLLM'],
+    ['LITELLM_MASTER_KEY', 'LITELLM_API_KEY', 'litellm', 'LiteLLM'],
+  ] as const) {
     it(`redacts credential values (${varName}) from overrides, the table render, and the JSON report`, async () => {
       const secret = `sk-live-${varName}-value-12345`
       const prev = process.env[varName]
-      const sibling = varName === 'AI_GATEWAY_API_KEY' ? 'VERCEL_OIDC_TOKEN' : 'AI_GATEWAY_API_KEY'
       const prevSibling = process.env[sibling]
       process.env[varName] = secret
       // Isolate the case under test: a stray ambient sibling must not change
       // what this case observes.
       delete process.env[sibling]
       try {
-        const provider = fakeProvider({ name: 'vercel-gateway', displayName: 'Vercel AI Gateway', network: true })
+        const provider = fakeProvider({ name: providerName, displayName, network: true })
         const report = await collectDoctorReport('all', { providers: [provider], cache: emptyCache() })
-        const r = only(report, 'vercel-gateway')
+        const r = only(report, providerName)
 
         // The "is this credential set?" diagnostic is useful; the value is a
         // live secret and must never leave doctor (Ruling 2 of lane 04).

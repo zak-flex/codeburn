@@ -663,9 +663,15 @@ final class AppStore {
 
     /// Switch to a period. Cancels any in-flight switch and fetches provider-specific +
     /// all-provider data in parallel so tab strip costs stay in sync with the hero.
+    /// Also syncs the menu-bar badge to the selected period (when the badge
+    /// supports it), so switching the popover from Today to 7D/Week visibly updates
+    /// the number in the menu bar instead of leaving it on the previous period.
     func switchTo(period: Period) {
         selectedPeriod = period
         selectedDays = []
+        if Period.menubarMetricCases.contains(period), menubarPeriod != period {
+            setMenubarPeriod(period)
+        }
         startInteractiveSelectionRefresh()
     }
 

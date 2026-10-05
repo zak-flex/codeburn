@@ -38,6 +38,17 @@ export type CodeburnConfig = {
   // GUI app that doesn't inherit the user's shell env) configure multi-account
   // aggregation without injecting env into every spawned subprocess.
   claudeConfigDirs?: string[]
+  // LiteLLM Proxy connection, read as a config-file fallback by the litellm
+  // provider. Env vars (LITELLM_BASE_URL / LITELLM_KEY / LITELLM_API_KEY /
+  // LITELLM_MASTER_KEY / LITELLM_USER_ID) always win so a power user can still
+  // override per-shell; this lets the macOS menubar (a GUI app that doesn't
+  // inherit the user's shell env) connect without injecting env into every
+  // spawned subprocess, the same way claudeConfigDirs works.
+  litellm?: {
+    baseUrl?: string
+    apiKey?: string
+    userId?: string
+  }
   // Map raw local-model names (e.g. "llama3.1:8b") to the paid model we would
   // price the call against (e.g. "gpt-4o"). The local call still costs $0; we
   // track what the same tokens would have cost on the baseline so the dashboard
