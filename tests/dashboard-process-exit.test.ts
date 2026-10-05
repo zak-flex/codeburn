@@ -161,7 +161,20 @@ describe('interactive dashboard process exit during cold hydration', () => {
       1_000,
       `dashboard did not render quit confirmation; output:\n${readOutput().slice(-2_000)}`,
     )
-    expect(await pathExists(hydrationLock)).toBe(true)
+    // The background index takes and releases the hydration lock once per phase
+    // (see the settle note in startHydratingDashboard), so the lock can blink
+    // between the "Finishing" banner and this check — most visibly on Windows,
+    // where process scheduling is coarser. Wait for it to be present and hold
+    // across a settle rather than asserting on a single instant.
+    await waitFor(
+      async () => {
+        if (!await pathExists(hydrationLock)) return false
+        await new Promise(resolve => setTimeout(resolve, 150))
+        return pathExists(hydrationLock)
+      },
+      5_000,
+      `hydration lock never held after quit confirmation; output:\n${readOutput().slice(-2_000)}`,
+    )
     child.stdin?.write('q')
     const exited = await waitForExit(child, 1_000, readOutput)
 

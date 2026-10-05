@@ -365,6 +365,31 @@ struct AppStoreRefreshRecoveryTests {
         #expect(snapshot.scoped.claudeConfigSourceId == snapshot.all.claudeConfigSourceId)
     }
 
+    @Test("switching the popover period also updates the menu-bar badge period")
+    func switchToPeriodSyncsMenubarPeriod() {
+        let store = AppStore()
+        store.suppressRefreshesForTesting()
+
+        // Default badge period is today; the popover follows the switch.
+        let initial = store.menubarPeriod
+        store.switchTo(period: .sevenDays)
+        #expect(store.selectedPeriod == .sevenDays)
+        #expect(store.menubarPeriod == .sevenDays)
+
+        store.switchTo(period: .month)
+        #expect(store.selectedPeriod == .month)
+        #expect(store.menubarPeriod == .month)
+
+        // The badge only follows periods it can display (menubarMetricCases).
+        // .lifetime is a popover-only period, so the badge stays on the last
+        // supported period rather than rendering a figure it cannot show.
+        store.switchTo(period: .lifetime)
+        #expect(store.selectedPeriod == .lifetime)
+        #expect(store.menubarPeriod == .month)
+
+        _ = initial
+    }
+
     @Test("a genuine provider zero remains valid when the all-provider slice is also zero")
     func genuineProviderZeroRemainsValid() {
         let store = AppStore()

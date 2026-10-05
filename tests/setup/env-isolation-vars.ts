@@ -76,6 +76,12 @@ export const CLEARED = [
   'KIMI_MODEL_NAME',
   'AI_GATEWAY_API_KEY',
   'VERCEL_OIDC_TOKEN',
+  // LiteLLM provider credential/endpoint overrides
+  'LITELLM_BASE_URL',
+  'LITELLM_API_KEY',
+  'LITELLM_KEY',
+  'LITELLM_MASTER_KEY',
+  'LITELLM_USER_ID',
   // Read by detectBashBloat - a dev's real shell limit must not bleed in
   'BASH_MAX_OUTPUT_LENGTH',
 ] as const
