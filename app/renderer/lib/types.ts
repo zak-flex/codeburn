@@ -23,6 +23,8 @@ export interface CliError {
    *  broken install, so the UI keeps its splash/progress state. Optional so an
    *  older preload simply never sets it. */
   cold?: true
+  /** For `not-found` only: the resolution stage enum from the main process. */
+  stage?: string
 }
 
 export type AliasRow = { from: string; to: string }
@@ -255,6 +257,12 @@ export type MenubarPayload = {
       sessions: number
       avgCostPerSession?: number
       sessionCountBasis?: 'identity' | 'partial'
+      /** Clones and worktrees folded into this repository row, when several;
+       *  the costliest 50 of `checkoutCount`. */
+      checkouts?: Array<{ id: string; cost: number; matchedByFolderName?: boolean }>
+      checkoutCount?: number
+      /** The one row for every temp-root folder outside a known repository. */
+      temporary?: boolean
       sessionDetails: Array<{
         cost: number
         savingsUSD: number
@@ -351,6 +359,22 @@ export type MenubarPayload = {
         approx?: boolean
         models?: string[]
         categories?: Array<{ name: string; cost: number }>
+        // Local PR signals (src/sessions-report.ts PrRow); older CLIs omit them.
+        runs?: number
+        linkEvidence?: 'explicit' | 'pr-link-only' | null
+        openedAt?: string | null
+        followUpRounds?: number | null
+        followUpPushes?: number
+        oneShot?: boolean | null
+        reviewRuns?: Array<{ kind: 'agent' | 'you'; label: string; model: string | null; costUSD: number; at: string; evidence: 'reads-pr' | 'gh-pr-review' }>
+        reviewCostUSD?: number
+        mergedAt?: string | null
+        timeToMergeMs?: number | null
+        costSplit?: { buildUSD: number; reviewUSD: number; fixesUSD: number }
+        carriedUSD?: number
+        runList?: Array<{ kind: 'session' | 'subagent'; description: string | null; model: string | null; costUSD: number; at: string; link: 'named' | 'pushed-head' | 'gh-pr' | 'opened' | 'carried' }>
+        state?: 'open' | 'draft' | 'merged' | 'closed' | null
+        followUpAt?: string[]
       }>
       distinctCost: number
       distinctSessions: number
@@ -695,6 +719,9 @@ export type SessionRow = {
   startedAt: string
   endedAt: string
   durationMs: number
+  // Subagent sessions folded into this parent row; their spend is already in
+  // the row's totals. Absent when none (and from older CLIs).
+  subagents?: SessionRow[]
 }
 
 // ————— src/session-contributions.ts (drill-through, `sessions --contributions`) —————
@@ -801,6 +828,12 @@ export type SessionWhy = {
   findings: WhyFinding[]
   rules: WhyRules
   detailsOmitted: boolean
+  prWork?: WhyPrWork
+}
+export type WhyPrWork = {
+  opened: Array<{ url: string; at: string; head: string | null; followUpRounds: number | null; followUpPushes: number }>
+  reviewRuns: Array<{ helperId: string; description: string; models: string[]; cost: number; pr: number | null }>
+  reviewCost: number
 }
 
 // ————— src/compare-stats.ts —————
@@ -1150,6 +1183,31 @@ export type UpdateStatus = {
   tag: string | null
   /** A Microsoft Store install, which the Store updates; nothing is checked or offered. */
   storeManaged?: boolean
+  /** One-click update state; absent where the banner links to a download instead. */
+  install?: 'available' | 'downloading' | 'ready'
+  /** The restart into a downloaded update did not happen; the banner offers a retry. */
+  installFailed?: boolean
+}
+
+export type CompanionComponent = 'cli' | 'menubar'
+
+/** One component's latest step from the CLI's `codeburn update --json` engine. */
+export type CompanionStep = {
+  state: 'start' | 'progress' | 'done' | 'skipped' | 'error'
+  code?: string
+  from?: string
+  to?: string
+  message?: string
+  /** The manual fallback the engine names on an error. */
+  command?: string
+}
+
+/** The menubar app and global CLI against the desktop's version (app/electron/companion-update.ts). */
+export type CompanionUpdateStatus = {
+  state: 'idle' | 'available' | 'running' | 'done' | 'error'
+  version: string
+  behind: CompanionComponent[]
+  steps: Partial<Record<CompanionComponent, CompanionStep>>
 }
 
 /** The tray app and the Capacity Dock the Windows desktop app bundles (app/electron/menubar.ts).
@@ -1229,7 +1287,7 @@ export type TrayPrefs = {
 
 export type ProjectFilter = { project: string[]; exclude: string[] }
 
-export type ProjectRow = { name: string; path: string; cost: number; sessions: number }
+export type ProjectRow = { name: string; path: string; cost: number; sessions: number; checkouts?: Array<{ path: string; cost: number; matchedByFolderName?: boolean }>; checkoutCount?: number; temporary?: boolean }
 
 export type ProjectsReport = { projects: ProjectRow[] }
 
@@ -1265,6 +1323,14 @@ export interface CodeburnBridge {
   getUpdateStatus(): Promise<UpdateStatus>
   /** Subscribe to pushed update-availability status; returns an unsubscribe fn. */
   onUpdateStatus(cb: (status: UpdateStatus) => void): () => void
+  /** Start the one-click download; absent on bridges without auto-update. */
+  downloadUpdate?(): Promise<UpdateStatus>
+  /** Quit and install a downloaded update. */
+  installUpdate?(): Promise<void>
+  /** The menubar app and global CLI update; absent on bridges without companions. */
+  getCompanionUpdate?(): Promise<CompanionUpdateStatus | null>
+  onCompanionUpdate?(cb: (status: CompanionUpdateStatus) => void): () => void
+  updateCompanions?(): Promise<boolean>
   getQuota(force?: boolean, disabled?: ProviderName[]): Promise<QuotaProvider[]>
   // `background` (prefetch only) requests background CLI-spawn priority; optional
   // so an older preload that ignores it degrades to interactive priority.
@@ -1320,6 +1386,9 @@ export interface CodeburnBridge {
   setProjectFilter(filter: ProjectFilter): Promise<ProjectFilter>
   /** Every project that exists, filter NOT applied: the Projects pane's checklist. */
   getUnfilteredProjects(): Promise<ProjectsReport>
+  /** Scope every report to one project path until cleared or the app restarts.
+   *  Absent on the IDE host, which has its own workspace scope. */
+  setTransientProject?(projectPath: string | null): Promise<void>
   setPriceOverride(model: string, rates: PriceRates): Promise<ActionResult>
   removePriceOverride(model: string): Promise<ActionResult>
   setCurrency(code: string): Promise<ActionResult>

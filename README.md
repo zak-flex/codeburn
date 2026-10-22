@@ -32,16 +32,22 @@
 <p align="center"><sub>To keep it: <code>npm install -g codeburn</code> or <code>brew install codeburn</code>. Needs Node.js 22.13+.</sub></p>
 
 <p align="center">
-  <a href="https://github.com/getagentseal/codeburn/releases/download/desktop-v0.9.25/CodeBurn-0.9.25-arm64.dmg"><img src="https://img.shields.io/badge/macOS-Apple_Silicon-F97316?logo=apple&logoColor=white" alt="Download CodeBurn for macOS (Apple Silicon)" /></a>
-  <a href="https://github.com/getagentseal/codeburn/releases/download/desktop-v0.9.25/CodeBurn-0.9.25.dmg"><img src="https://img.shields.io/badge/macOS-Intel-F97316?logo=apple&logoColor=white" alt="Download CodeBurn for macOS (Intel)" /></a>
+  <a href="https://codeburn.app/download/mac-arm64"><img src="https://img.shields.io/badge/macOS-Apple_Silicon-F97316?logo=apple&logoColor=white" alt="Download CodeBurn for macOS (Apple Silicon)" /></a>
+  <a href="https://codeburn.app/download/mac-x64"><img src="https://img.shields.io/badge/macOS-Intel-F97316?logo=apple&logoColor=white" alt="Download CodeBurn for macOS (Intel)" /></a>
   <a href="https://apps.microsoft.com/detail/9P0R4ZL5XMB8"><img src="https://img.shields.io/badge/Windows-Microsoft_Store-F97316?logo=microsoft&logoColor=white" alt="Get CodeBurn from the Microsoft Store" /></a>
-  <a href="https://github.com/getagentseal/codeburn/releases/download/desktop-v0.9.25/CodeBurn-Setup-0.9.25.exe"><img src="https://img.shields.io/badge/Windows-.exe-F97316?logo=windows&logoColor=white" alt="Download the CodeBurn Windows installer (.exe)" /></a>
-  <a href="https://github.com/getagentseal/codeburn/releases/download/desktop-v0.9.25/codeburn-desktop_0.9.25_amd64.deb"><img src="https://img.shields.io/badge/Linux-.deb-F97316?logo=debian&logoColor=white" alt="Download CodeBurn for Linux (.deb)" /></a>
-  <a href="https://github.com/getagentseal/codeburn/releases/download/desktop-v0.9.25/codeburn-desktop-0.9.25.x86_64.rpm"><img src="https://img.shields.io/badge/Linux-.rpm-F97316?logo=redhat&logoColor=white" alt="Download CodeBurn for Linux (.rpm)" /></a>
-  <a href="https://github.com/getagentseal/codeburn/releases/download/desktop-v0.9.25/CodeBurn-0.9.25.AppImage"><img src="https://img.shields.io/badge/Linux-AppImage-F97316?logo=linux&logoColor=white" alt="Download CodeBurn for Linux (AppImage)" /></a>
+  <a href="https://codeburn.app/download/windows-exe"><img src="https://img.shields.io/badge/Windows-.exe-F97316?logo=windows&logoColor=white" alt="Download the CodeBurn Windows installer (.exe)" /></a>
+  <a href="https://codeburn.app/download/linux-deb"><img src="https://img.shields.io/badge/Linux-.deb-F97316?logo=debian&logoColor=white" alt="Download CodeBurn for Linux (.deb)" /></a>
+  <a href="https://codeburn.app/download/linux-rpm"><img src="https://img.shields.io/badge/Linux-.rpm-F97316?logo=redhat&logoColor=white" alt="Download CodeBurn for Linux (.rpm)" /></a>
+  <a href="https://codeburn.app/download/linux-appimage"><img src="https://img.shields.io/badge/Linux-AppImage-F97316?logo=linux&logoColor=white" alt="Download CodeBurn for Linux (AppImage)" /></a>
 </p>
 
-<p align="center"><sub>Desktop app 0.9.25. The macOS builds are signed with a Developer ID and notarized by Apple.</sub></p>
+<p align="center"><sub>The macOS builds are signed with a Developer ID and notarized by Apple.</sub></p>
+
+> **Installing from this fork?** The npm / brew / `npx` lines below install the
+> published (upstream) package, which does not include this fork's LiteLLM
+> Proxy provider. Follow **[docs/FLEX-INSTALL.md](docs/FLEX-INSTALL.md)** to
+> build from source and connect LiteLLM. This page and that file are
+> fork-only and are not part of upstream CodeBurn.
 
 > **Installing from this fork?** The npm / brew / `npx` lines below install the
 > published (upstream) package, which does not include this fork's LiteLLM
@@ -148,11 +154,19 @@ codeburn menubar
 
 On Linux the same view lives in the top panel, as a GNOME Shell extension.
 
-The desktop app runs on Windows. Install it from the [Microsoft Store](https://apps.microsoft.com/detail/9P0R4ZL5XMB8), which is the recommended way and keeps itself up to date, or take the [direct installer](https://github.com/getagentseal/codeburn/releases/download/desktop-v0.9.25/CodeBurn-Setup-0.9.25.exe). The Windows tray app shows today's cost next to the clock, the same way the macOS menu bar does, and clicking it opens the same popover. The Capacity Dock is there too, from the tray menu or the app's Plugins page. If you run your agents inside WSL, CodeBurn reads the distro's home directory as well as your Windows profile, so sessions you ran in Linux are counted without you installing anything twice.
+The desktop app runs on Windows. Install it from the [Microsoft Store](https://apps.microsoft.com/detail/9P0R4ZL5XMB8), which is the recommended way and keeps itself up to date, or take the [direct installer](https://codeburn.app/download/windows-exe). The Windows tray app shows today's cost next to the clock, the same way the macOS menu bar does, and clicking it opens the same popover. The Capacity Dock is there too, from the tray menu or the app's Plugins page. If you run your agents inside WSL, CodeBurn reads the distro's home directory as well as your Windows profile, so sessions you ran in Linux are counted without you installing anything twice.
 
 Setup for all three platforms, including WSL, is in [Menu bar and tray](docs/menubar.md).
 
 ## Inside your agent
+
+In Claude Code, install the plugin. It sets up the MCP server below and adds `/codeburn:cost`, which summarizes today's spend:
+
+```
+/plugin install codeburn --marketplace getagentseal/codeburn
+```
+
+Or register only the MCP server:
 
 ```bash
 claude mcp add codeburn -- npx -y codeburn mcp
@@ -229,6 +243,8 @@ CodeBurn reads files that are already on your disk. There is no account, no API 
 Your prompts, your code and your project names stay on your computer. CodeBurn does not sit between you and your agent, so if it stopped working tomorrow your tools would not notice.
 
 Prices come from [LiteLLM](https://github.com/BerriAI/litellm) and refresh once a day.
+
+Everything that does leave your machine is listed in [Privacy](https://codeburn.app/docs/privacy).
 
 ## Built in the open
 
@@ -421,7 +437,7 @@ From the tools the session used and the words in your own messages, with no mode
 <details>
 <summary><strong>On a subscription the dollars are an estimate. What is estimated and what is measured?</strong></summary>
 
-The tokens are measured for most tools. Claude Code, Codex, Gemini, Zed, OpenCode and others write real per-call input, output and cache counts into their own session files, and CodeBurn reads those rather than guessing. The price applied to them is published API pricing, so the dollar figure is arithmetic on measured tokens, not a guess about your bill. A few tools record no counts at all, so Cursor, Kiro and some Copilot sessions are estimated from content length, and those are marked estimated in the tables. `codeburn audit` prints a row per provider and model saying where every number came from.
+The tokens are measured for most tools. Claude Code, Codex, Gemini, Zed, OpenCode and others write real per-call input, output and cache counts into their own session files, and CodeBurn reads those rather than guessing. The price applied to them is published API pricing, so the dollar figure is arithmetic on measured tokens, not a guess about your bill. A few tools record no counts at all, so Cursor, Kiro and some Copilot sessions are estimated from content length, and those are marked estimated in the tables. Claude Code also bills some calls it does not write to its transcripts: some advisor calls, and subagent replies that keep only part of their usage. For those, CodeBurn can show less than Claude Code's own cost counter. `codeburn audit` prints a row per provider and model saying where every number came from.
 
 </details>
 
@@ -509,7 +525,9 @@ The other events are name-only:
 | `app_open`, `app_close` | Session length in whole minutes |
 | `section_view` | Which section you opened (`overview`, `spend`, …) |
 | `cold_start` | Milliseconds to the first painted overview, and whether it timed out |
-| `cli_error` | Error kind and the command name, capped at 20 per kind per day |
+| `cli_error` | Error kind, the command name, how long it ran as a range (`<1s` to `120s+`), the exit code or signal, a reason label (`lock-busy`, `oom`, `eacces`, `enoent`, `network`, `parse`, `shutdown`, `serve`, `other`) picked on your machine from the error text, which is never sent, and the provider when the read was for one provider. Capped at 20 per kind per day |
+| `provider_read_fail` | A provider whose data could not be read: its name, the stage (`locate` or `parse`) and the error kind (`eacces`, `busy`, `enoent`, `malformed`, `error`). Once a day per provider, stage and kind |
+| `update_result` | How a one-click update went: the version before and after, and `ok`, `download_fail`, `verify_fail` or `install_fail`. Also sent by the macOS menu bar app and the Windows tray |
 | `optimize_apply` | The finding id you took a fix for (`unused-mcp`, `claude-md-too-long`, …) and the fix type |
 | `plan_set` | Provider and plan preset id |
 | `export` | Format (`csv` or `json`) and provider |

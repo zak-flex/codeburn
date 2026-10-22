@@ -159,7 +159,7 @@
 "Update Check Failed" = "更新の確認に失敗";
 "CLI Update Failed" = "CLIの更新に失敗";
 "Menubar Update Failed" = "メニューバーアプリの更新に失敗";
-"CodeBurn could not check GitHub for updates." = "CodeBurnはGitHubで更新を確認できませんでした。";
+"CodeBurn could not check for updates." = "CodeBurnは更新を確認できませんでした。";
 "CodeBurn could not update the CLI." = "CodeBurnはCLIを更新できませんでした。";
 "CodeBurn could not update the menubar app." = "CodeBurnはメニューバーアプリを更新できませんでした。";
 "Click to retry the update check." = "クリックして更新確認を再試行します。";
@@ -167,12 +167,20 @@
 "Updating..." = "更新中…";
 "Update" = "更新";
 "Update the CLI and menubar to the latest release" = "CLIとメニューバーアプリを最新版に更新";
+"Desktop Update Failed" = "デスクトップアプリの更新に失敗";
+"CodeBurn could not update the desktop app." = "CodeBurnはデスクトップアプリを更新できませんでした。";
+"Updating CLI..." = "CLIを更新中…";
+"Updating menubar..." = "メニューバーアプリを更新中…";
+"Opening CodeBurn to update..." = "更新のためCodeBurnを開いています…";
+"Update the CLI, menubar and desktop app to the latest release" = "CLI、メニューバーアプリ、デスクトップアプリを最新版に更新";
 "CodeBurn %@ available" = "CodeBurn %@ が利用可能";
 "App and CLI %@ updates are ready. Click to install." = "アプリとCLIの%@アップデートの準備ができました。クリックしてインストールしてください。";
 "Click to install the update." = "クリックして更新をインストールします。";
 "CodeBurn CLI %@ available" = "CodeBurn CLI %@ が利用可能";
 "Could not find the package manager for %1$@. Run “%2$@” manually, then try again." = "%1$@用のパッケージマネージャーが見つかりませんでした。「%2$@」を手動で実行してから、もう一度お試しください。";
 "the CLI" = "CLI";
+"This codeburn CLI comes with the CodeBurn desktop app. Update the desktop app, then try again." = "このcodeburn CLIはCodeBurnデスクトップアプリに同梱されています。デスクトップアプリを更新してから、もう一度お試しください。";
+"npm does not have permission to update the global codeburn install. Run “%@” in Terminal, then try again." = "npmにはグローバルのcodeburnを更新する権限がありません。ターミナルで「%@」を実行してから、もう一度お試しください。";
 "CLI update failed (exit %lld)" = "CLIの更新に失敗しました（終了コード %lld）";
 "Your codeburn CLI (%1$@) is too old to update the menubar. Run “%2$@” first, then try again." = "codeburn CLI（%1$@）が古すぎるためメニューバーアプリを更新できません。まず「%2$@」を実行してから、もう一度お試しください。";
 "Update failed (exit %lld)" = "更新に失敗しました（終了コード %lld）";
@@ -215,9 +223,6 @@
 "%1$@ over limit (%2$lld%%)" = "%1$@が上限超過（%2$lld%%）";
 "resets in %@" = "%@後にリセット";
 "Change accent color" = "アクセントカラーを変更";
-"CLI %@ available" = "CLI %@ が利用可能";
-"Update now" = "今すぐ更新";
-"Update the CLI (and the menubar if one is available) automatically" = "CLI（および利用可能であればメニューバーアプリ）を自動的に更新";
 "Copy update command to clipboard" = "更新コマンドをクリップボードにコピー";
 "Enjoying CodeBurn?" = "CodeBurnを楽しんでいますか？";
 "Star us on GitHub" = "GitHubでスターをつける";
@@ -609,6 +614,7 @@
 "This credential predates a live CodeBurn quota adapter and is not treated as a connection." = "この認証情報はCodeBurnのリアルタイムクォータアダプターより前のものであり、接続としては扱われません。";
 "Quota adapter not available" = "クォータアダプター未対応";
 "Retrying" = "再試行中";
+"Cline login expired" = "Clineのログインの有効期限切れ";
 "%@ is catalogued, but CodeBurn cannot fetch its live quota yet." = "%@は登録されていますが、CodeBurnはまだそのリアルタイムクォータを取得できません。";
 "Live quota is available to Capacity Dock." = "リアルタイムのクォータを容量ドックで利用できます。";
 "Waiting for quota data." = "クォータデータを待機中です。";

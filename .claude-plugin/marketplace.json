@@ -1,0 +1,15 @@
+{
+  "name": "codeburn",
+  "owner": {
+    "name": "CodeBurn",
+    "url": "https://codeburn.app"
+  },
+  "description": "The CodeBurn plugin for Claude Code",
+  "plugins": [
+    {
+      "name": "codeburn",
+      "source": "./plugins/codeburn",
+      "description": "See what your AI coding tools cost, from inside Claude Code"
+    }
+  ]
+}

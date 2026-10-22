@@ -180,15 +180,22 @@ describe('getModelCosts', () => {
       expect(getModelCosts('deepseek-v4-pro')?.longContextTier).toBeUndefined()
     })
 
-    it('applies the tier to every token at and after the threshold, and only then', () => {
-      // prompt tokens = input + cached input; below the threshold the base
-      // rates apply, at it the tier's rates price the WHOLE request.
+    it('applies the tier to every token above the threshold, and only then', () => {
+      // prompt tokens = input + cache read + cache write; up to and including
+      // the threshold the base rates apply, above it the tier's rates price
+      // the WHOLE request.
       const below = calculateCost('gpt-5.6', 271_999, 0, 0, 0, 0, 'standard', 0, 'codex')
       expect(below).toBeCloseTo(271_999 * 4e-6, 9)
       const at = calculateCost('gpt-5.6', 272_000, 0, 0, 0, 0, 'standard', 0, 'codex')
-      expect(at).toBeCloseTo(272_000 * 8e-6, 9)
-      const above = calculateCost('gpt-5.6', 271_000, 0, 0, 1_000, 0, 'standard', 0, 'codex')
-      expect(above).toBeCloseTo(271_000 * 8e-6 + 1_000 * 8e-7, 9)
+      expect(at).toBeCloseTo(272_000 * 4e-6, 9)
+      const over = calculateCost('gpt-5.6', 272_001, 0, 0, 0, 0, 'standard', 0, 'codex')
+      expect(over).toBeCloseTo(272_001 * 8e-6, 9)
+      const above = calculateCost('gpt-5.6', 271_001, 0, 0, 1_000, 0, 'standard', 0, 'codex')
+      expect(above).toBeCloseTo(271_001 * 8e-6 + 1_000 * 8e-7, 9)
+      // Cache-write tokens are prompt tokens too: 72k input + 200k cache read
+      // + 1 cache write crosses the threshold.
+      const withWrite = calculateCost('gpt-5.6', 72_000, 0, 1, 200_000, 0, 'standard', 0, 'codex')
+      expect(withWrite).toBeCloseTo(72_000 * 8e-6 + 1 * 1e-5 + 200_000 * 8e-7, 9)
       // The tier applies only where billing evidence exists for it: the same
       // call through a provider not in TIERED_PRICING_PROVIDERS (or none, the
       // default for every legacy caller) keeps the base rate.
@@ -759,6 +766,13 @@ describe('modelKeyMatches', () => {
     expect(modelKeyMatches('xgpt-5', 'gpt-5')).toBe(false)
     expect(modelKeyMatches('claude-opus-4.8', 'claude-opus-4')).toBe(false)
   })
+
+  it('treats a short numeric dash segment as a minor version, not a suffix', () => {
+    expect(modelKeyMatches('claude-sonnet-4-6', 'claude-sonnet-4')).toBe(false)
+    expect(modelKeyMatches('claude-sonnet-4-6-20260101', 'claude-sonnet-4')).toBe(false)
+    expect(modelKeyMatches('claude-sonnet-4-20250514', 'claude-sonnet-4')).toBe(true)
+    expect(modelKeyMatches('claude-sonnet-4-5', 'claude-sonnet-4-5')).toBe(true)
+  })
 })
 
 describe('claude-fable-5 pricing + name', () => {
@@ -917,6 +931,15 @@ describe('user aliases via setModelAliases', () => {
     setModelAliases({ 'anthropic--claude-4.6-opus': 'claude-sonnet-4-5' })
     setModelAliases({})
     expect(getModelCosts('anthropic--claude-4.6-opus')).toEqual(getModelCosts('claude-opus-4-6'))
+  })
+
+  it('a display name looked up before an alias change follows the new aliases', () => {
+    setModelAliases({})
+    expect(getShortModelName('gpt-4o')).toBe('GPT-4o')
+    setModelAliases({ 'gpt-4o': 'claude-opus-4-6' })
+    expect(getShortModelName('gpt-4o')).toBe('Opus 4.6')
+    setModelAliases({})
+    expect(getShortModelName('gpt-4o')).toBe('GPT-4o')
   })
 })
 

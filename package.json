@@ -1,7 +1,8 @@
 {
   "name": "codeburn",
-  "version": "0.9.26-SNAPSHOT",
+  "version": "0.9.28-SNAPSHOT",
   "description": "See where your AI spend goes - by task, tool, model, and project",
+  "mcpName": "io.github.getagentseal/codeburn",
   "type": "module",
   "main": "./dist/cli.js",
   "bin": {
@@ -19,7 +20,7 @@
     "build:dash": "cd dash && npm ci --no-audit --no-fund --silent && npm run build",
     "build:vscode": "npm --prefix vscode run build",
     "package:vscode": "npm --prefix vscode run package",
-    "dev": "NODE_OPTIONS=--no-deprecation tsx src/cli.ts",
+    "dev": "node --no-deprecation --import tsx src/cli.ts",
     "test": "vitest run tests --exclude \"tests/cache-refresh-lock*\"",
     "test:locks": "vitest run tests/cache-refresh-lock.test.ts tests/cache-refresh-lock-corrupt-body.test.ts tests/cache-refresh-lock-process.test.ts tests/cache-refresh-lock-status-snapshot.test.ts --poolOptions.forks.singleFork=true",
     "test:watch": "vitest tests --exclude \"tests/cache-refresh-lock*\"",

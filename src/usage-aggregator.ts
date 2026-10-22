@@ -3,7 +3,7 @@ import { CATEGORY_LABELS, type ProjectSummary, type SessionSummary, type TaskCat
 import { behavioralCallWeight } from './behavioral-weight.js'
 import { type PeriodData, type ProviderCost, type BreakdownArrays, type MenubarPayload, type ClaudeConfigSelector, type HydrationState, buildMenubarPayload } from './menubar-json.js'
 import { type SessionCountBasis } from './session-count-label.js'
-import { parseAllSessions, filterProjectsByName, filterProjectsByDays, filterProjectsByClaudeConfigSource, filterProjectsByDateRange, isSessionHydrationComplete, makeProjectFilter, type ProjectFilterTarget, sessionHydrationSnapshot } from './parser.js'
+import { parseAllSessions, filterProjectsByName, mergeProjectSplits, filterProjectsByDays, filterProjectsByClaudeConfigSource, filterProjectsByDateRange, isSessionHydrationComplete, makeProjectFilter, type ProjectFilterTarget, sessionHydrationSnapshot } from './parser.js'
 type ProjectFilter = (entry: ProjectFilterTarget) => boolean
 
 import { findUnpricedModels, getFlatRateModelsConfigHash, getLocalModelSavingsConfigHash, getPriceOverridesConfigHash, getShortModelName, isExpectedFreeModel, billableOutputTokens, modelRowKey } from './models.js'
@@ -17,14 +17,15 @@ import { aggregateModelEfficiency, buildRetryTax } from './model-efficiency.js'
 import { aggregateModels } from './models-report.js'
 import { aggregateModelTaskTurns, sessionDurationMinutes } from './telemetry-snapshot.js'
 import { scanUserCorrections, medianTimeToFirstEditMs, aggregateFileChurn, computePricingCoverage } from './workflow-insights.js'
-import { buildPrAttribution, aggregateByBranch } from './sessions-report.js'
+import { buildPrAttribution, aggregateByBranch, foldedSessionRows } from './sessions-report.js'
 import { scanAndDetect } from './optimize.js'
 import { callBillableOutputTokens, sessionBillableOutput, sessionBillableOutputTokens, inferSessionProvider } from './session-output.js'
 import { getDateRange } from './cli-date.js'
 import { activityStreak } from './streak.js'
-import { getDaysInRange, ensureCacheHydrated, loadDailyCache, cachedProjectIdentities, emptyCache, mergeDayEntries, BACKFILL_DAYS, toDateString, type DailyCache, type DailyEntry, type ProjectDayStats, type ProviderDaySlice } from './daily-cache.js'
+import { getDaysInRange, ensureCacheHydrated, loadDailyCache, cachedProjectIdentities, projectDayIdentity, emptyCache, mergeDayEntries, BACKFILL_DAYS, toDateString, type DailyCache, type DailyEntry, type ProjectDayStats, type ProviderDaySlice } from './daily-cache.js'
 import { buildGranularHistory } from './granular-history.js'
 import { spendProjectIdentity } from './spend-flow.js'
+import { folderNameOriginKey, isTemporaryProjectPath, linkedOriginKey, originRepoName, projectOriginKey, TEMPORARY_PROJECTS } from './git-origin.js'
 import { AGGREGATE_ONLY_PROVIDER, excludeAggregateOnlyProjects, excludesAggregateOnlyProviders } from './parser.js'
 
 // Row caps for the by-PR / by-branch payload aggregations, ranked by cost.
@@ -500,7 +501,7 @@ export function excludeProviderFromDay(day: DailyEntry, provider: string): Daily
       }
       if (Object.values(left).some(v => v > 0)) {
         Object.defineProperty(projects, key, {
-          value: { ...left, ...(p.path ? { path: p.path } : {}) },
+          value: { ...left, ...(p.path ? { path: p.path } : {}), ...(p.originKey ? { originKey: p.originKey } : {}) },
           enumerable: true, writable: true, configurable: true,
         })
       }
@@ -602,7 +603,7 @@ function sumMatchingProjects(
 ): { cost: number; calls: number; savingsUSD: number; sessions: number; projects: Record<string, ProjectDayStats>; matched: number } {
   const out = { cost: 0, calls: 0, savingsUSD: 0, sessions: 0, projects: {} as Record<string, ProjectDayStats>, matched: 0 }
   for (const [name, p] of Object.entries(projects)) {
-    if (!matches({ project: name, projectPath: p.path ?? '' })) continue
+    if (!matches(projectDayIdentity(name, p))) continue
     out.cost += p.cost
     out.calls += p.calls
     out.savingsUSD += p.savingsUSD ?? 0
@@ -1098,7 +1099,7 @@ type PayloadSessionDetail = NonNullable<PayloadProject['sessionDetails']>[number
 /// Filename-colliding `sess.jsonl` in two folders stay distinct. Same file
 /// spanning days stays one. Not fingerprint/cost/calls.
 export function canonicalSessionCountKey(session: SessionSummary, projectPath?: string): string {
-  const loc = projectPath || session.workingDirectory || session.project
+  const loc = session.projectSplit?.primaryProjectPath || projectPath || session.workingDirectory || session.project
   return `${inferSessionProvider(session)}\0${loc}\0${session.sessionId}`
 }
 
@@ -1259,6 +1260,10 @@ function sessionDetailsOf(sessions: SessionSummary[]): PayloadSessionDetail[] {
     }))
 }
 
+const TEMPORARY_KEY = '\0temporary'
+const TEMPORARY_NAME = 'Temporary folders'
+const MAX_CHECKOUTS = 50
+
 function displayBasename(path: string | undefined, fallback: string, home: string): string {
   if (!path) return fallback
   if (path === home || path === home + '/') return 'Home'
@@ -1289,10 +1294,13 @@ function disambiguatedProjectName(
 /// cache days attach only when cache+live agree on exactly one known identity.
 /// Otherwise the pathless total stays at the legacy slug (unallocated) and is
 /// cache-authoritative for matching live rows of that slug: do not add those
-/// live costs again. A truly different live-only slug at a cwd still counts.
+/// live costs again. Without a day set, a different live-only slug still counts.
 ///
 /// Cost/savings stay per-contributor (cache ?? live) except for the
-/// unallocated matching-slug case above. Session *counts* are live unique IDs
+/// unallocated matching-slug case above. With a day set, money comes from the
+/// days alone: they are what the headline sums, and a live parse can resolve
+/// sealed calls to another identity (a deleted worktree, a bare cursor-agent
+/// label), which counted them twice. Session *counts* are live unique IDs
 /// when accounting is source-only; any cache row without identities is a
 /// lower bound (max of live unique and the max per-day tick, never a sum).
 /// Session details follow the same allocation: only matching sessions, never
@@ -1314,10 +1322,12 @@ export function buildPayloadProjects(
     liveCost: number
     liveSavings: number
     liveSessions: number
+    liveCalls: number
   }
   type Acc = {
     id: string
     path?: string
+    originKey?: string
     fallbackName: string
     contribs: Map<string, Contrib>
     sessions: SessionSummary[]
@@ -1358,6 +1368,7 @@ export function buildPayloadProjects(
         liveCost: 0,
         liveSavings: 0,
         liveSessions: 0,
+        liveCalls: 0,
       }
       acc.contribs.set(slug, c)
     }
@@ -1373,9 +1384,10 @@ export function buildPayloadProjects(
     path: string | undefined,
     cost: number,
     savingsUSD: number,
-    occupancy: { sessions: number, sessionDays: number, maxDaySessions: number, calls: number },
+    occupancy: { sessions: number, sessionDays: number, maxDaySessions: number, calls: number, originKey?: string },
   ): Acc => {
     const acc = take(slug, path, slug)
+    acc.originKey ??= occupancy.originKey
     const c = contribOf(acc, slug)
     c.hasCache = true
     c.cacheCost += cost
@@ -1403,7 +1415,7 @@ export function buildPayloadProjects(
     for (const s of p.sessions) rememberLiveSlug(s.project, p.projectPath)
   }
 
-  type Totals = { cost: number; savingsUSD: number; sessions: number; sessionDays: number; maxDaySessions: number; calls: number }
+  type Totals = { cost: number; savingsUSD: number; sessions: number; sessionDays: number; maxDaySessions: number; calls: number; originKey?: string }
   const knownBySlug = new Map<string, Map<string, Totals>>()
   const pathlessBySlug = new Map<string, Totals>()
   const emptyTotals = (): Totals => ({ cost: 0, savingsUSD: 0, sessions: 0, sessionDays: 0, maxDaySessions: 0, calls: 0 })
@@ -1419,7 +1431,8 @@ export function buildPayloadProjects(
   }
   if (cacheDays) {
     for (const d of cacheDays) {
-      for (const [name, p] of Object.entries(d.projects ?? {})) {
+      for (const [key, p] of Object.entries(d.projects ?? {})) {
+        const name = projectDayIdentity(key, p).project
         if (p.path) {
           const id = spendProjectIdentity({ project: name, projectPath: p.path }).id
           let byId = knownBySlug.get(name)
@@ -1429,6 +1442,7 @@ export function buildPayloadProjects(
           }
           const acc = byId.get(id) ?? emptyTotals()
           addTotals(acc, p.cost, p.savingsUSD, p.sessions, p.calls)
+          acc.originKey ??= p.originKey
           byId.set(id, acc)
         } else {
           const acc = pathlessBySlug.get(name) ?? emptyTotals()
@@ -1482,10 +1496,11 @@ export function buildPayloadProjects(
       const policy = policyFor(p.project, liveId)
       if (policy === 'suppress') continue
       const acc = take(p.project, p.projectPath, p.project)
-      if (policy === 'use-live') {
+      if (policy === 'use-live' && !cacheDays) {
         const c = contribOf(acc, p.project)
         c.liveCost += p.totalCostUSD
         c.liveSavings += p.totalSavingsUSD
+        c.liveCalls += p.totalApiCalls
       }
       continue
     }
@@ -1499,10 +1514,11 @@ export function buildPayloadProjects(
       const acc = take(p.project, p.projectPath, p.project)
       addSessionOnce(acc, s)
       const c = contribOf(acc, s.project)
-      if (policy === 'use-live') {
+      if (policy === 'use-live' && !cacheDays) {
         c.liveCost += s.totalCostUSD
         c.liveSavings += s.totalSavingsUSD
         c.liveSessions += 1
+        c.liveCalls += s.apiCalls
       } else {
         c.liveSessions += 1
       }
@@ -1513,9 +1529,11 @@ export function buildPayloadProjects(
     const path = acc.path
     let cost = 0
     let savingsUSD = 0
+    let calls = 0
     for (const c of acc.contribs.values()) {
       cost += c.hasCache ? c.cacheCost : c.liveCost
       savingsUSD += c.hasCache ? c.cacheSavings : c.liveSavings
+      calls += c.hasCache ? c.cacheCalls : c.liveCalls
     }
     const liveUnique = uniqueCanonicalSessionCount(acc.sessions, acc.path)
     let cacheDayBound = 0
@@ -1542,27 +1560,70 @@ export function buildPayloadProjects(
       basename: displayBasename(path, acc.fallbackName, home),
       cost,
       savingsUSD,
+      calls,
       sessions,
       sessionCountBasis,
+      liveUnique,
     }
   })
   const basenameCounts = new Map<string, number>()
   for (const row of rows) basenameCounts.set(row.basename, (basenameCounts.get(row.basename) ?? 0) + 1)
 
-  return rows
-    .map(({ acc, path, basename, cost, savingsUSD, sessions, sessionCountBasis }) => {
-      const details = sessionDetailsOf(acc.sessions)
-      return {
-        id: acc.id,
-        name: disambiguatedProjectName(path, basename, acc.fallbackName, basenameCounts),
-        cost,
-        savingsUSD,
-        sessions,
-        sessionCountBasis,
-        ...(details.length ? { sessionDetails: details } : {}),
+  // Every checkout of one repository is one row, folded only after each
+  // checkout's cache-or-live choice is made: folding first would let one clone's
+  // cache row hide another clone's live-only spend under the same slug.
+  const groups = new Map<string, typeof rows>()
+  const byFolderName = new Set<(typeof rows)[number]>()
+  for (const row of rows) {
+    const realOrigin = linkedOriginKey(row.path) ?? row.acc.originKey ?? projectOriginKey(row.path)
+    const nameOrigin = realOrigin ? null : folderNameOriginKey(row.path)
+    if (nameOrigin) byFolderName.add(row)
+    const key = realOrigin ?? nameOrigin ?? (isTemporaryProjectPath(row.path) ? TEMPORARY_KEY : `\0${row.acc.id}`)
+    const held = groups.get(key)
+    if (held) held.push(row)
+    else groups.set(key, [row])
+  }
+  const repoNames = new Map<string, number>()
+  for (const key of groups.keys()) if (!key.startsWith('\0')) repoNames.set(originRepoName(key), (repoNames.get(originRepoName(key)) ?? 0) + 1)
+
+  return [...groups].map(([key, members]) => {
+    members.sort((a, b) => b.cost - a.cost)
+    const lead = members[0]!
+    const repo = key.startsWith('\0') ? null : key
+    const temporary = key === TEMPORARY_KEY
+    // A session with slices in two checkouts counts once for the repository.
+    const keys = new Set<string>()
+    let anonymous = 0
+    for (const m of members) {
+      for (const session of m.acc.sessions) {
+        if (session.sessionId) keys.add(canonicalSessionCountKey(session, m.acc.path))
+        else anonymous += 1
       }
-    })
-    .sort((a, b) => b.cost - a.cost)
+    }
+    const shared = members.reduce((sum, m) => sum + m.liveUnique, 0) - keys.size - anonymous
+    const sessions = members.reduce((sum, m) => sum + m.sessions, 0) - shared
+    const sessionCountBasis = members.some(m => m.sessionCountBasis === 'partial') ? 'partial' as const : lead.sessionCountBasis
+    const details = sessionDetailsOf(members.flatMap(m => m.acc.sessions))
+    return {
+      id: lead.acc.id,
+      name: temporary ? TEMPORARY_NAME
+        : repo ? (repoNames.get(originRepoName(repo))! > 1 ? repo.split('/').slice(-2).join('/') : originRepoName(repo))
+        : disambiguatedProjectName(lead.path, lead.basename, lead.acc.fallbackName, basenameCounts),
+      ...(temporary ? { temporary: true } : {}),
+      // A rooted path that still resolves to the repository, so selecting the
+      // row scopes to all of it (Codex records cwds without the leading slash).
+      path: temporary ? TEMPORARY_PROJECTS
+        : ((repo && members.find(m => m.path && /^(\/|[a-zA-Z]:[\\/])/.test(m.path) && projectOriginKey(m.path) === repo)) || lead).path ?? lead.acc.id,
+      cost: members.reduce((sum, m) => sum + m.cost, 0),
+      savingsUSD: members.reduce((sum, m) => sum + m.savingsUSD, 0),
+      calls: members.reduce((sum, m) => sum + m.calls, 0),
+      sessions,
+      sessionCountBasis,
+      // Capped: the temporary row can hold thousands, and this rides every poll.
+      ...(members.length > 1 ? { checkouts: members.slice(0, MAX_CHECKOUTS).map(m => ({ id: m.acc.id, cost: m.cost, ...(byFolderName.has(m) ? { matchedByFolderName: true } : {}) })), checkoutCount: members.length } : {}),
+      ...(details.length ? { sessionDetails: details } : {}),
+    }
+  }).sort((a, b) => b.cost - a.cost)
 }
 
 /**
@@ -1835,22 +1896,20 @@ export async function buildMenubarPayloadForRange(periodInfo: PeriodInfo, opts: 
 
   const retryTax = buildRetryTax(effMap.values())
 
-  currentData.topSessions = scanProjects.flatMap(p =>
-    p.sessions.map(s => ({
-      project: friendlyProject(p),
-      cost: s.totalCostUSD,
-      savingsUSD: s.totalSavingsUSD,
-      calls: s.apiCalls,
-      date: s.firstTimestamp?.split('T')[0] ?? '',
-      // Drill-through identity (additive): provider + id let the desktop open
-      // the exact session even when another provider reuses the id or title.
-      // `projectKey` is the RAW session project (the sessions-list row key);
-      // `project` above stays the friendly display name.
-      sessionId: s.sessionId,
-      provider: inferSessionProvider(s),
-      projectKey: s.project || p.project,
-    }))
-  ).sort((a, b) => (b.cost + b.savingsUSD) - (a.cost + a.savingsUSD)).slice(0, 5)
+  currentData.topSessions = foldedSessionRows(mergeProjectSplits(scanProjects)).map(row => ({
+    project: friendlyProject(row.summary),
+    cost: row.cost,
+    savingsUSD: row.savingsUSD,
+    calls: row.calls,
+    date: row.startedAt?.split('T')[0] ?? '',
+    // Drill-through identity (additive): provider + id let the desktop open
+    // the exact session even when another provider reuses the id or title.
+    // `projectKey` is the RAW session project (the sessions-list row key);
+    // `project` above stays the friendly display name.
+    sessionId: row.sessionId,
+    provider: row.provider,
+    projectKey: row.project,
+  })).sort((a, b) => (b.cost + b.savingsUSD) - (a.cost + a.savingsUSD)).slice(0, 5)
 
   // PULL REQUESTS + BRANCHES (all-provider path only). Both are session-layer
   // aggregations over the surviving-session parse, so carried history cannot
@@ -1863,7 +1922,7 @@ export async function buildMenubarPayloadForRange(periodInfo: PeriodInfo, opts: 
   // sessions) so this stays the genuine unscoped all-provider aggregation.
   if (isAllProviders && !effectivelyScoped) {
     // One pass yields both rows and totals, so they never disagree.
-    const { rows: prRows, totals: prTotals } = buildPrAttribution(scanProjects)
+    const { rows: prRows, totals: prTotals } = buildPrAttribution(mergeProjectSplits(scanProjects))
     if (prRows.length > 0) {
       currentData.pullRequests = {
         // PRs are user-auditable spend records, so never collapse the tail into

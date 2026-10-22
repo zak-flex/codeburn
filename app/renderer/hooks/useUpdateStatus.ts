@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { codeburn } from '../lib/ipc'
-import type { UpdateStatus } from '../lib/types'
+import type { CompanionUpdateStatus, UpdateStatus } from '../lib/types'
 
 /**
  * Reads the main-process update-availability status once on mount and stays live
@@ -18,6 +18,20 @@ export function useUpdateStatus(): UpdateStatus | null {
     const unsubscribe = typeof codeburn.onUpdateStatus === 'function'
       ? codeburn.onUpdateStatus(next => { if (active) setStatus(next) })
       : undefined
+    return () => { active = false; unsubscribe?.() }
+  }, [])
+  return status
+}
+
+/** The menubar app and global CLI update, read once and kept live like the desktop's own.
+ *  Null where the bridge has no companions (an older preload, the IDE, a test mock). */
+export function useCompanionUpdate(): CompanionUpdateStatus | null {
+  const [status, setStatus] = useState<CompanionUpdateStatus | null>(null)
+  useEffect(() => {
+    if (typeof codeburn.getCompanionUpdate !== 'function') return
+    let active = true
+    codeburn.getCompanionUpdate().then(next => { if (active) setStatus(next) }).catch(() => {})
+    const unsubscribe = codeburn.onCompanionUpdate?.(next => { if (active) setStatus(next) })
     return () => { active = false; unsubscribe?.() }
   }, [])
   return status

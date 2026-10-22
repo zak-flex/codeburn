@@ -7,6 +7,7 @@ import { basename, join } from 'path'
 import { homedir } from 'os'
 
 import { isReadShapedBashCommand } from './bash-utils.js'
+import { EDIT_TOOLS } from './classifier.js'
 import { readSessionLines, readSessionFileSync } from './fs-utils.js'
 import { discoverAllSessions, providerDisplayName } from './providers/index.js'
 import { parseJsonlLine, shouldSkipLine } from './parser.js'
@@ -16,7 +17,7 @@ import { formatTokens } from './format.js'
 import { recommendModelDefault, type ModelDefaultRecommendation } from './act/model-defaults.js'
 import { appliedFixGlyph, formatAppliedFix, type AppliedFix } from './act/types.js'
 import { isUserStartedSession, userStartedProjects } from './session-population.js'
-import { inferSessionProvider, sessionBillableOutputTokens } from './session-output.js'
+import { countSessions, inferSessionProvider, sessionBillableOutputTokens } from './session-output.js'
 import { aggregateFileChurn, buildCoachingNotes, scanUserCorrections, medianTimeToFirstEditMs, worstOneShotCategory, type ReworkedFile } from './workflow-insights.js'
 
 // ============================================================================
@@ -36,6 +37,9 @@ const RED = '#F55B5B'
 
 export const AVG_TOKENS_PER_READ = 600
 export const TOKENS_PER_MCP_TOOL = 400
+// A deferred MCP tool sits in the prompt as its name line only (measured
+// median 32 chars), not its schema.
+export const TOKENS_PER_DEFERRED_MCP_TOOL = 9
 export const TOOLS_PER_MCP_SERVER = 5
 export const TOKENS_PER_AGENT_DEF = 80
 export const TOKENS_PER_SKILL_DEF = 80
@@ -1786,7 +1790,7 @@ function estimateMcpSchemaCostAttributed(
         const toolCount = typeof unused === 'number'
           ? Math.min(unused, inventoryCounts.get(server) ?? 0)
           : [...new Set(unused ?? [])].reduce((count, fqn) => count + (inventory.has(fqn) ? 1 : 0), 0)
-        if (toolCount > 0) loaded.push({ server, schemaTokens: toolCount * TOKENS_PER_MCP_TOOL })
+        if (toolCount > 0) loaded.push({ server, schemaTokens: toolCount * TOKENS_PER_DEFERRED_MCP_TOOL })
       }
       if (loaded.length === 0) continue
 
@@ -1796,8 +1800,10 @@ function estimateMcpSchemaCostAttributed(
           // call. Charge it once, then attribute the capped amount in
           // proportion to each server's unused schema. This conserves the
           // combined total and makes any local-only subset additive.
-          addBucket(loaded, call.usage.cacheCreationInputTokens, 'cacheWriteTokens')
-          addBucket(loaded, call.usage.cacheReadInputTokens, 'cacheReadTokens')
+          // The tool lines sit in the prefix: a call that read cache read
+          // them; only a call with no cache read wrote them.
+          if (call.usage.cacheReadInputTokens > 0) addBucket(loaded, call.usage.cacheReadInputTokens, 'cacheReadTokens')
+          else addBucket(loaded, call.usage.cacheCreationInputTokens, 'cacheWriteTokens')
         }
       }
     }
@@ -1952,7 +1958,7 @@ export function detectMcpToolCoverage(
     id: 'mcp-low-coverage',
     title: `${flagged.length} MCP server${flagged.length === 1 ? '' : 's'} with low tool coverage`,
     explanation:
-      `Schema for unused tools is loaded into the system prompt every session and ` +
+      `Each unused tool adds a deferred name line to every session's prompt, ` +
       `carried in the cached prefix on every turn. ` +
       `${lines.join('; ')}.${connectorGuidance}${ambiguousGuidance}`,
     impact,
@@ -2037,17 +2043,16 @@ function estimateMcpProfileColdSchemaCost(
       for (const [server, toolsAvailable] of serverToolCounts) {
         if (!coldProjectKeysByServer.get(server)?.has(projectKey)) continue
         if (!sessionLoadedMcpServer(session, server)) continue
-        schemaTokens += toolsAvailable * TOKENS_PER_MCP_TOOL
+        schemaTokens += toolsAvailable * TOKENS_PER_DEFERRED_MCP_TOOL
       }
       if (schemaTokens === 0) continue
 
       for (const turn of session.turns) {
         for (const call of turn.assistantCalls) {
-          if (call.usage.cacheCreationInputTokens > 0) {
-            cacheWriteTokens += Math.min(schemaTokens, call.usage.cacheCreationInputTokens)
-          }
           if (call.usage.cacheReadInputTokens > 0) {
             cacheReadTokens += Math.min(schemaTokens, call.usage.cacheReadInputTokens)
+          } else if (call.usage.cacheCreationInputTokens > 0) {
+            cacheWriteTokens += Math.min(schemaTokens, call.usage.cacheCreationInputTokens)
           }
         }
       }
@@ -2197,7 +2202,7 @@ export function detectMcpProfileAdvisor(
     title: `${candidates.length} MCP server${candidates.length === 1 ? '' : 's'} should be project-scoped`,
     explanation:
       `These MCP servers look useful in a small set of projects but are loaded into other projects where they are not invoked. ` +
-      `Project-scoping them keeps the hot-project workflow while avoiding schema overhead elsewhere. ${lines.join('; ')}${extra}.`,
+      `Project-scoping them keeps the hot-project workflow while avoiding their tool lines elsewhere. ${lines.join('; ')}${extra}.`,
     impact,
     tokensSaved,
     fix: {
@@ -2513,7 +2518,7 @@ export function detectUnusedMcp(
 
   if (unused.length === 0) return null
 
-  const totalSessions = projects.reduce((s, p) => s + p.sessions.length, 0)
+  const totalSessions = countSessions(projects)
   const schemaTokensPerSession = unused.length * TOOLS_PER_MCP_SERVER * TOKENS_PER_MCP_TOOL
   const tokensSaved = schemaTokensPerSession * Math.max(totalSessions, 1)
 
@@ -2866,7 +2871,7 @@ export function detectMcpAlwaysLoadHygiene(
   const versions = apiCalls.map(c => c.version).filter(v => v.length > 0)
   if (versions.length > 0 && versions.every(v => versionPredates(v, ALWAYSLOAD_MIN_VERSION))) return null
 
-  const totalSessions = projects.reduce((s, p) => s + p.sessions.length, 0)
+  const totalSessions = countSessions(projects)
   if (totalSessions === 0) return null
 
   const coverageByServer = new Map(mcpCoverage.map(c => [c.server, c]))
@@ -3079,6 +3084,9 @@ export function detectBloatedClaudeMd(projectCwds: Set<string>): WasteFinding | 
 export const READ_TOOL_NAMES = new Set(['Read', 'Grep', 'Glob', 'FileReadTool', 'GrepTool', 'GlobTool'])
 export const EDIT_TOOL_NAMES = new Set(['Edit', 'Write', 'FileEditTool', 'FileWriteTool', 'NotebookEdit'])
 export const BASH_TOOL_NAMES = new Set(['Bash', 'BashTool', 'PowerShellTool'])
+// Writing a new file has nothing to read first; counting Write flagged subagents
+// that produce reports as editing blind. Not EDIT_TOOL_NAMES: act report baselines use that.
+const RATIO_EDIT_TOOL_NAMES = new Set(['Edit', 'FileEditTool', 'NotebookEdit'])
 
 export function detectLowReadEditRatio(calls: ToolCall[]): WasteFinding | null {
   let reads = 0
@@ -3095,7 +3103,7 @@ export function detectLowReadEditRatio(calls: ToolCall[]): WasteFinding | null {
       // reckless editors (90%+ of real reads were invisible to this ratio).
       reads++
       if (call.recent) recentReads++
-    } else if (EDIT_TOOL_NAMES.has(call.name)) {
+    } else if (RATIO_EDIT_TOOL_NAMES.has(call.name)) {
       edits++
       if (call.recent) recentEdits++
     }
@@ -3455,15 +3463,26 @@ function formatContextRatio(ratio: number): string {
 
 // Use (\s|$|--) instead of \b after commit/push so `git commit-tree` and
 // `git commit-graph` are not treated as deliveries. The `--` clause keeps
-// `git commit --amend` matching as a real delivery command.
+// `git commit --amend` matching as a real delivery command. Git's global
+// options (`git -C dir commit`, `git -c user.name=x commit`) may sit between
+// `git` and the subcommand.
 const DELIVERY_COMMAND_PATTERNS = [
-  /(?:^|[;&|]\s*)git\s+(?:commit|push)(?=\s|$|--)(?![^;&|]*--dry-run)/,
-  /(?:^|[;&|]\s*)gh\s+pr\s+(?:create|merge)(?=\s|$|--)(?![^;&|]*--dry-run)/,
+  /(?:^|[;&|(\n]\s*|\b(?:do|then)\s+)git(?:\s+-[Cc]\s+\S+|\s+--[\w-]+(?:=\S+)?)*\s+(?:commit|push)(?=\s|$|--)(?![^;&|\n]*--dry-run)/,
+  /(?:^|[;&|(\n]\s*|\b(?:do|then)\s+)gh\s+pr\s+(?:create|merge)(?=\s|$|--)(?![^;&|\n]*--dry-run)/,
 ]
 
+// bashBreakdown keys are base command names (`git`), so delivery is read from
+// the full command text each call keeps in its tool sequence.
 function sessionDeliveryCommand(session: ProjectSummary['sessions'][number]): string | null {
-  const commands = Object.keys(session.bashBreakdown)
-  return commands.find(command => DELIVERY_COMMAND_PATTERNS.some(pattern => pattern.test(command))) ?? null
+  for (const turn of session.turns) {
+    for (const call of turn.assistantCalls) {
+      for (const tool of call.toolSequence?.flat() ?? []) {
+        const command = tool.command
+        if (command && DELIVERY_COMMAND_PATTERNS.some(pattern => pattern.test(command))) return command
+      }
+    }
+  }
+  return null
 }
 
 function hasCategoryBreakdownData(session: ProjectSummary['sessions'][number]): boolean {
@@ -3497,11 +3516,16 @@ function sessionRetryCount(session: ProjectSummary['sessions'][number]): number 
   return session.turns.reduce((sum, turn) => sum + turn.retries, 0)
 }
 
-function sessionTotalTurns(session: ProjectSummary['sessions'][number]): number {
-  if (hasCategoryBreakdownData(session)) {
-    return Object.values(session.categoryBreakdown).reduce((sum, c) => sum + c.turns, 0)
+// Counted the way the classifier counts retries: one per edit tool call.
+function sessionEditSteps(session: ProjectSummary['sessions'][number]): number {
+  let steps = 0
+  for (const turn of session.turns) {
+    for (const call of turn.assistantCalls) {
+      const tools = call.toolSequence?.length ? call.toolSequence.flat().map(t => t.tool) : call.tools
+      steps += tools.filter(tool => EDIT_TOOLS.has(tool)).length
+    }
   }
-  return session.turns.length
+  return steps
 }
 
 // Token-savings estimate for a low-worth candidate. Two regimes:
@@ -3511,8 +3535,8 @@ function sessionTotalTurns(session: ProjectSummary['sessions'][number]): number 
 //   - Sessions with edits but with retries / no one-shot: only the retry
 //     fraction is counted as recoverable. Edits may still have been useful;
 //     we credit the model with that and only flag the retry overhead.
-// Ratio is bounded to [0, 1] so retry-heavy sessions with weird turn counts
-// can't claim more than the full session token total.
+// A retry is a re-edit, so the fraction is retries over edit steps, not over
+// user prompts (an agent loop can make dozens of edits per prompt).
 function estimateLowWorthRecoverableTokens(
   session: ProjectSummary['sessions'][number],
   editTurns: number,
@@ -3520,9 +3544,9 @@ function estimateLowWorthRecoverableTokens(
 ): number {
   const tokens = sessionTokenTotal(session)
   if (editTurns === 0) return Math.round(tokens * WORTH_IT_NO_EDIT_RECOVERY_FRACTION)
-  const totalTurns = sessionTotalTurns(session)
-  if (totalTurns === 0) return 0
-  const fraction = Math.min(1, Math.max(0, retries / totalTurns))
+  const editSteps = sessionEditSteps(session)
+  if (editSteps === 0) return 0
+  const fraction = Math.min(1, Math.max(0, retries / editSteps))
   return Math.round(tokens * fraction)
 }
 
@@ -4006,14 +4030,14 @@ export function cacheKey(projects: ProjectSummary[], dateRange: DateRange | unde
   // stale findings when cost/tokens moved (e.g. a re-price) while call count
   // held - reachable in the long-lived menubar process within the 60s TTL.
   // Cost is scaled to whole micro-dollars so float jitter cannot thrash the key.
-  let calls = 0, cost = 0, savings = 0, proxied = 0, sessions = 0, sidechains = 0
+  let calls = 0, cost = 0, savings = 0, proxied = 0, sidechains = 0
+  const sessions = countSessions(projects)
   const sidechainIdentities: string[] = []
   for (const p of projects) {
     calls += p.totalApiCalls
     cost += p.totalCostUSD
     savings += p.totalSavingsUSD
     proxied += p.totalProxiedCostUSD
-    sessions += p.sessions.length
     for (const session of p.sessions) {
       if (session.isSidechain !== true) continue
       sidechains++

@@ -29,5 +29,18 @@
   "Today · %1$@ · %2$@": "今天 · %1$@ · %2$@",
   "Today · no usage yet": "今天 · 暂无用量",
   "Top": "顶部",
-  "Week": "本周"
+  "Week": "本周",
+  "Updating the CLI...": "正在更新 CLI...",
+  "CLI updated to %@.": "CLI 已更新到 %@。",
+  "The CLI is up to date.": "CLI 已是最新版本。",
+  "No global CLI found.": "未找到全局 CLI。",
+  "Another CodeBurn update is already running.": "另一个 CodeBurn 更新正在运行。",
+  "CLI %@ is not on npm yet. Try again in a few minutes.": "CLI %@ 尚未发布到 npm。请几分钟后重试。",
+  "CodeBurn is not allowed to change the CLI folder. Run this in a terminal:": "CodeBurn 无权修改 CLI 所在文件夹。请在终端中运行：",
+  "CodeBurn could not tell how the CLI was installed. Run this in a terminal:": "CodeBurn 无法判断 CLI 的安装方式。请在终端中运行：",
+  "The CLI update failed. Run this in a terminal:": "CLI 更新失败。请在终端中运行：",
+  "The CLI update did not run. Run this in a terminal:": "CLI 更新未能运行。请在终端中运行：",
+  "Your package manager updates this CLI.": "此 CLI 由你的包管理器更新。",
+  "Opening CodeBurn to update the desktop app.": "正在打开 CodeBurn 以更新桌面应用。",
+  "Update CLI": "更新 CLI"
 }

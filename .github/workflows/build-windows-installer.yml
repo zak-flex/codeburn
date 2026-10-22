@@ -31,9 +31,9 @@ jobs:
     if: ${{ github.event_name != 'release' && !(github.event_name == 'workflow_dispatch' && inputs.release_tag != '') }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22.13.0
           cache: npm
@@ -53,11 +53,12 @@ jobs:
 
       # The installer ships the tray app: stage-menubar.mjs takes the MSI that
       # `tauri build` leaves in windows/src-tauri/target/release/bundle/msi.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: windows/src-tauri
 
@@ -65,9 +66,11 @@ jobs:
         working-directory: windows
         run: npm ci
 
+      # The staged tray MSI needs no updater signature: the tray updates from its own windows-v* line.
       - name: Build tray app
         working-directory: windows
-        run: npm run tauri build
+        shell: bash
+        run: npm run tauri build -- --no-sign
 
       - name: Build NSIS installer
         run: npm --prefix app run package:win
@@ -82,12 +85,13 @@ jobs:
           }
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: CodeBurn-Windows-Installer
           path: |
             app/release/CodeBurn-Setup-*.exe
             app/release/CodeBurn-Setup-*.exe.blockmap
+            app/release/latest.yml
           if-no-files-found: error
           retention-days: 30
 
@@ -95,7 +99,7 @@ jobs:
     if: ${{ (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'desktop-v')) || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Verify live desktop release assets
         env:
@@ -107,3 +111,36 @@ jobs:
           node app/scripts/verify-windows-installer.mjs \
             --tag "$RELEASE_TAG" \
             --release-assets "$RUNNER_TEMP/release-assets.json"
+
+  # Last step of a desktop release: point the app's update feed at it. Runs only after the
+  # live-asset check passes, and refuses to move the feed backwards.
+  publish-update-feeds:
+    needs: verify-release-assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Publish desktop update feeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          version="${RELEASE_TAG#desktop-v}"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '[.assets[].name]' > release-assets.json
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -p 'latest*.yml'
+          node "$GITHUB_WORKSPACE/app/scripts/update-feed.mjs" --tag "$RELEASE_TAG" --release-assets release-assets.json latest*.yml
+          if gh release view update-feeds -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            current=$(gh release download update-feeds -R "$GITHUB_REPOSITORY" -p latest-mac.yml -O - 2>/dev/null | sed -n 's/^version: //p' || true)
+            if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)" != "$version" ]; then
+              echo "::error::update-feeds already serves $current, newer than $version"
+              exit 1
+            fi
+          else
+            gh release create update-feeds -R "$GITHUB_REPOSITORY" --prerelease --latest=false \
+              --title "Update feeds" --notes "Update metadata for the apps. Not a release to download."
+          fi
+          gh release upload update-feeds -R "$GITHUB_REPOSITORY" latest*.yml --clobber

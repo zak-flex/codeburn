@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-Please report security vulnerabilities via [GitHub's private vulnerability reporting](https://github.com/getagentseal/codeburn/security/advisories/new).
+Please report security vulnerabilities via [GitHub's private vulnerability reporting](https://github.com/getagentseal/codeburn/security/advisories/new) or by email to security@codeburn.app.
 
 Do not open a public issue for security vulnerabilities.
 
@@ -13,7 +13,11 @@ Security reports are welcome for:
 - The CLI (`src/`)
 - The menubar installer (`src/menubar-installer.ts`)
 - The macOS menubar app (`mac/`)
-- The desktop app (`desktop/`)
+- The desktop app (`app/`)
+- The Windows app (`windows/`)
+- The VS Code extension (`vscode/`)
+- The GNOME extension (`gnome/`)
+- The web dashboard (`dash/`)
 - CI/CD workflows (`.github/workflows/`)
 
 ## Release Integrity

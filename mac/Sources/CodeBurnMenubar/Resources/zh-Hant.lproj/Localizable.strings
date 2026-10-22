@@ -159,7 +159,7 @@
 "Update Check Failed" = "檢查更新失敗";
 "CLI Update Failed" = "命令列工具更新失敗";
 "Menubar Update Failed" = "選單欄應用更新失敗";
-"CodeBurn could not check GitHub for updates." = "CodeBurn 無法從 GitHub 檢查更新。";
+"CodeBurn could not check for updates." = "CodeBurn 無法檢查更新。";
 "CodeBurn could not update the CLI." = "CodeBurn 無法更新命令列工具。";
 "CodeBurn could not update the menubar app." = "CodeBurn 無法更新選單欄應用。";
 "Click to retry the update check." = "點按以重新檢查更新。";
@@ -167,12 +167,20 @@
 "Updating..." = "正在更新…";
 "Update" = "更新";
 "Update the CLI and menubar to the latest release" = "將命令列工具和選單欄應用更新到最新版本";
+"Desktop Update Failed" = "桌面應用程式更新失敗";
+"CodeBurn could not update the desktop app." = "CodeBurn 無法更新桌面應用程式。";
+"Updating CLI..." = "正在更新命令列工具…";
+"Updating menubar..." = "正在更新選單欄應用…";
+"Opening CodeBurn to update..." = "正在開啟 CodeBurn 以進行更新…";
+"Update the CLI, menubar and desktop app to the latest release" = "將命令列工具、選單欄應用和桌面應用程式更新到最新版本";
 "CodeBurn %@ available" = "CodeBurn %@ 可用";
 "App and CLI %@ updates are ready. Click to install." = "應用與命令列工具 %@ 更新已就緒。點按以安裝。";
 "Click to install the update." = "點按以安裝更新。";
 "CodeBurn CLI %@ available" = "CodeBurn 命令列工具 %@ 可用";
 "Could not find the package manager for %1$@. Run “%2$@” manually, then try again." = "找不到 %1$@ 對應的套件管理器。請手動執行“%2$@”，然後重試。";
 "the CLI" = "命令列工具";
+"This codeburn CLI comes with the CodeBurn desktop app. Update the desktop app, then try again." = "此 codeburn 命令列工具隨 CodeBurn 桌面應用程式提供。請更新桌面應用程式，然後重試。";
+"npm does not have permission to update the global codeburn install. Run “%@” in Terminal, then try again." = "npm 沒有更新全域 codeburn 安裝的權限。請在終端機中執行“%@”，然後重試。";
 "CLI update failed (exit %lld)" = "命令列工具更新失敗（退出碼 %lld）";
 "Your codeburn CLI (%1$@) is too old to update the menubar. Run “%2$@” first, then try again." = "你的 codeburn 命令列工具（%1$@）版本過舊，無法更新選單欄應用。請先執行“%2$@”，然後重試。";
 "Update failed (exit %lld)" = "更新失敗（退出碼 %lld）";
@@ -215,9 +223,6 @@
 "%1$@ over limit (%2$lld%%)" = "%1$@ 已超限（%2$lld%%）";
 "resets in %@" = "%@後重置";
 "Change accent color" = "更改主題色";
-"CLI %@ available" = "命令列工具 %@ 可用";
-"Update now" = "立即更新";
-"Update the CLI (and the menubar if one is available) automatically" = "自動更新命令列工具（以及可用的選單欄應用）";
 "Copy update command to clipboard" = "將更新命令複製到剪貼簿";
 "Enjoying CodeBurn?" = "喜歡 CodeBurn 嗎？";
 "Star us on GitHub" = "在 GitHub 上點個 Star";
@@ -606,6 +611,7 @@
 "This credential predates a live CodeBurn quota adapter and is not treated as a connection." = "此憑證早於 CodeBurn 的實時配額介面卡，不會被視為一個連線。";
 "Quota adapter not available" = "配額介面卡不可用";
 "Retrying" = "正在重試";
+"Cline login expired" = "Cline 登入已過期";
 "%@ is catalogued, but CodeBurn cannot fetch its live quota yet." = "%@ 已收錄，但 CodeBurn 還無法獲取其實時配額。";
 "Live quota is available to Capacity Dock." = "實時配額已可供容量 Dock 使用。";
 "Waiting for quota data." = "正在等待配額資料。";

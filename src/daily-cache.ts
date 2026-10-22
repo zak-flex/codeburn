@@ -5,6 +5,8 @@ import { join } from 'path'
 
 import { getCodeburnCacheDir, RETIRED_PROVIDER_NAMES } from './cache-dir.js'
 import { sweepSupersededCacheFiles } from './cache-sweep.js'
+import { coverageFor, coversLocalDay, loadCursorImport } from './cursor-import.js'
+import { projectOriginKey } from './git-origin.js'
 import type { ProjectFilterTarget } from './parser.js'
 import type { DateRange, ProjectSummary } from './types.js'
 
@@ -314,7 +316,52 @@ import type { DateRange, ProjectSummary } from './types.js'
 // From 11 Sep 2026 the alias served K2.8 Preview, which has no published rate;
 // those calls price as K2.7 Code and are marked estimated.
 // Calls are unchanged, so no PENDING_REDERIVE_PROVIDER_VERSIONS entry is needed.
-export const DAILY_CACHE_VERSION = 64
+// v65: Grok Build reads per-request usage from logs/unified.jsonl and uses it
+// in place of a session dir's one-call rollup for every session the log holds;
+// days finalized without it re-derive. A logged session's single rollup call,
+// dated at its last activity, becomes one call per request dated at that
+// request, so a session that crossed midnight moves calls to an earlier day and
+// grok joins PENDING_REDERIVE_PROVIDER_VERSIONS at 65.
+// v66: Codex fork replay bursts drop only records found in the parent rollout;
+// burst records the parent kept only inside a running total now count. Calls
+// only rise, so no PENDING_REDERIVE_PROVIDER_VERSIONS entry is needed.
+// v67: a day's project split is keyed per (label, path) instead of per label,
+// which kept only the first path a label showed that day and handed the whole
+// label (e.g. every home-folder Claude session) to whichever project owned it.
+// Day and provider totals are unchanged, only the split inside them moves, so
+// no PENDING_REDERIVE_PROVIDER_VERSIONS entry is needed.
+// v68: Kimi Code sessions whose state.json carries `cwd` but no `workDir` land
+// on that folder. Only the per-project split moves; cost, tokens and calls are
+// unchanged, so the bump re-derives surviving days.
+// v69: Claude calls go to the project of their own cwd, so a session that
+// moved folders splits across projects per call. Settled days re-derive their
+// project rows; provider call counts and cost are unchanged, so no
+// PENDING_REDERIVE_PROVIDER_VERSIONS entry is needed. Days whose transcripts
+// are gone keep their old single-project attribution.
+// v70: a day's project entry records the `origin` remote of its checkout, so
+// clones and worktrees of one repository still group once the folder is
+// deleted. Totals and the split are unchanged; surviving days re-derive to
+// pick it up, carried days stay as they were.
+// v71: a Cursor usage import that landed while the running binary had no
+// daily-cache file of its own skipped its invalidation, so adoption carried the
+// local Cursor estimates back and the guard kept them over the imported events,
+// which are fewer calls. cursor joins PENDING_REDERIVE_PROVIDER_VERSIONS at 71.
+// v72: on days a Cursor import fully covers, the parse produces no local
+// cursor-agent (or Grok Bot, when the import holds its rows) slice, so the
+// merge carried the old one on top of the imported rows. Adoption and the
+// complete re-derive now drop those slices; the bump repairs carried days.
+// v73: cursor-agent skips agent transcripts of Cursor IDE chats, which the
+// cursor provider already counts from the IDE database. Those calls leave
+// cursor-agent, so it joins PENDING_REDERIVE_PROVIDER_VERSIONS at 73.
+// v74: Antigravity sessions whose gen_metadata lacks usage.model are parsed
+// instead of dropped, Gemini 3.8 Flash placeholders get their own ids and
+// Gemini 3 Flash -a/-d rows are priced. Calls and cost only rise, so no
+// PENDING_REDERIVE_PROVIDER_VERSIONS entry is needed.
+// v75: Copilot chat-session requests count every agent round and bill from
+// copilotCredits, and a chat session that also ran on the agent host is left
+// to it. That twin drops calls, so copilot joins
+// PENDING_REDERIVE_PROVIDER_VERSIONS at 75.
+export const DAILY_CACHE_VERSION = 75
 const MIN_SUPPORTED_VERSION = 28
 
 /// Providers whose per-day CALL COUNT means something different at
@@ -339,8 +386,9 @@ const MIN_SUPPORTED_VERSION = 28
 /// untouched, in both directions, and every other provider keeps the guard.
 const PENDING_REDERIVE_PROVIDER_VERSIONS: Readonly<Record<string, number>> = {
   // 56: a store row now pairs with its tokenless per-turn twin, which can
-  // move one call across midnight.
-  copilot: 56,
+  // move one call across midnight. 75: chat sessions that also ran on the
+  // agent host are no longer counted from the journal.
+  copilot: 75,
   // Codex response records replace stale/zero token_count twins and can
   // legitimately reduce counts as well as recover missing usage.
   codex: 43,
@@ -356,10 +404,16 @@ const PENDING_REDERIVE_PROVIDER_VERSIONS: Readonly<Record<string, number>> = {
   // on the session's last-activity day; sessions.db dates each request.
   devin: 46,
   // 58: transcript turns moved from the session's last write to prompt time.
-  'cursor-agent': 58,
+  // 73: transcripts of Cursor IDE chats are left to the cursor provider.
+  'cursor-agent': 73,
   // 59: standalone rows without created_at moved from the file mtime to the
   // first step's time.
   antigravity: 59,
+  // 65: logged sessions moved from one rollup at last activity to per-request
+  // calls at request time.
+  grok: 65,
+  // 71: imported Cursor events replace the local estimates with fewer calls.
+  cursor: 71,
 }
 
 function providersPendingRederiveFrom(fromVersion: number): string[] {
@@ -389,7 +443,23 @@ export type CategoryDayStats = { turns: number; cost: number; savingsUSD: number
 /// `path` is the project's filesystem path when known — it is what display
 /// layers derive a friendly name from once the sessions that carried the
 /// mapping are gone.
-export type ProjectDayStats = { cost: number; calls: number; savingsUSD: number; sessions: number; path?: string }
+export type ProjectDayStats = { cost: number; calls: number; savingsUSD: number; sessions: number; path?: string; originKey?: string }
+
+/// One project label can span several real paths (every Claude session started
+/// from the home folder shares `-Users-<name>`), so since v67 a day's project
+/// split is keyed per (label, path). Days written earlier key by label alone
+/// and keep one path for the whole label; they stay readable through
+/// projectDayIdentity.
+const PROJECT_KEY_SEP = '\u0000'
+
+export function projectDayKey(project: string, path?: string): string {
+  return path ? `${project}${PROJECT_KEY_SEP}${path}` : project
+}
+
+export function projectDayIdentity(key: string, stats: ProjectDayStats): ProjectFilterTarget & { projectPath: string } {
+  const sep = key.indexOf(PROJECT_KEY_SEP)
+  return { project: sep === -1 ? key : key.slice(0, sep), projectPath: stats.path ?? '', ...(stats.originKey ? { originKey: stats.originKey } : {}) }
+}
 
 export type ProviderDaySlice = {
   calls: number
@@ -588,6 +658,7 @@ function sanitizeProjects(raw: unknown): { projects?: DailyEntry['projects'] } {
       savingsUSD: num(p.savingsUSD),
       sessions: num(p.sessions),
       ...(typeof p.path === 'string' && p.path.length > 0 ? { path: p.path } : {}),
+      ...(typeof p.originKey === 'string' && p.originKey.length > 0 ? { originKey: p.originKey } : {}),
     })
   }
   return Object.keys(out).length > 0 ? { projects: out } : {}
@@ -751,7 +822,7 @@ async function adoptOlderDailyCaches(): Promise<DailyCache> {
   } catch {
     return emptyCache()
   }
-  const candidates: { parsed: AdoptableCache; mtimeMs: number }[] = []
+  let candidates: { parsed: AdoptableCache; mtimeMs: number }[] = []
   for (const name of names) {
     if (!name.startsWith('daily-cache') || !name.includes('.json')) continue
     if (name === DAILY_CACHE_FILENAME) continue
@@ -768,9 +839,22 @@ async function adoptOlderDailyCaches(): Promise<DailyCache> {
     }
   }
   if (candidates.length === 0) return emptyCache()
-  // Priority: newer schema first, then most recently written. Higher priority
-  // wins per (day, provider); lower priority only fills what is missing.
-  candidates.sort((a, b) => (b.parsed.version - a.parsed.version) || (b.mtimeMs - a.mtimeMs))
+  // Priority: files finalized by a complete parse first (an interrupted
+  // backfill can hold under-read days), then newer schema, then most recently
+  // written. Higher priority wins per (day, provider); lower priority only
+  // fills what is missing. Not "more calls wins": older generations hold both
+  // days a later re-derive truncated and calls a later dedup removed, and a
+  // call count cannot tell the two apart.
+  candidates.sort((a, b) => Number(b.parsed.complete === true) - Number(a.parsed.complete === true) || (b.parsed.version - a.parsed.version) || (b.mtimeMs - a.mtimeMs))
+  // A date is a local-midnight bucket, so two files written under different
+  // timezones hold different hours under the same date and any per-slice union
+  // of them counts the hours between the two midnights twice. Adopt one
+  // timezone only, the top file's, and tag the result with it so hydration
+  // re-buckets it if the machine's differs. Preferring the machine's dropped
+  // the richest file whenever an older one matched. Files from before tzKey
+  // existed cannot be told apart and stay in.
+  const adoptTz = candidates.find(c => c.parsed.tzKey !== undefined)?.parsed.tzKey ?? currentTzKey()
+  candidates = candidates.filter(c => c.parsed.tzKey === undefined || c.parsed.tzKey === adoptTz)
 
   let base: DailyCache
   let rest = candidates
@@ -778,11 +862,11 @@ async function adoptOlderDailyCaches(): Promise<DailyCache> {
     base = migratedFrom(candidates[0]!.parsed as Parameters<typeof migratedFrom>[0])
     rest = candidates.slice(1)
   } else {
-    base = emptyCache()
+    base = emptyCache(candidates[0]!.parsed.savingsConfigHash)
   }
   let days = base.days
   for (const { parsed } of rest) {
-    days = mergeDayEntries(days, migrateDays(parsed.days), true)
+    days = mergeDayEntries(days, await withoutImportReplacedSlices(migrateDays(parsed.days)), true)
   }
   // loadDailyCache has standalone readers, so the adopted result must already
   // satisfy the cache's own invariants: no today/future entries (they would be
@@ -790,7 +874,7 @@ async function adoptOlderDailyCaches(): Promise<DailyCache> {
   const now = new Date()
   const todayStr = toDateString(now)
   const yesterdayStr = toDateString(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))
-  days = applyRetention(days.filter(d => d.date < todayStr), yesterdayStr)
+  days = stampOrigins(applyRetention(days.filter(d => d.date < todayStr), yesterdayStr))
   // A trusted base can carry lastComputedDate >= today (clock skew wrote a
   // frozen today entry that the purge above just removed). Left as-is it would
   // make hydration skip the gap parse forever and the purged day would never
@@ -801,6 +885,7 @@ async function adoptOlderDailyCaches(): Promise<DailyCache> {
   }
   const adopted: DailyCache = {
     ...base,
+    tzKey: adoptTz,
     lastComputedDate,
     days,
     // Anything adopted out of an OLDER file was derived under an older
@@ -824,6 +909,22 @@ async function adoptOlderDailyCaches(): Promise<DailyCache> {
   }
   await saveDailyCache(adopted).catch(() => {})
   return adopted
+}
+
+/// Adopted days written before v70 learn the repository of each checkout that
+/// still exists, so the record outlives the folder. Days whose folder is gone
+/// keep their path alone.
+function stampOrigins(days: DailyEntry[]): DailyEntry[] {
+  for (const day of days) {
+    for (const holder of [day, ...Object.values(day.providers)]) {
+      for (const p of Object.values(holder.projects ?? {})) {
+        if (p.originKey || !p.path) continue
+        const originKey = projectOriginKey(p.path)
+        if (originKey) p.originKey = originKey
+      }
+    }
+  }
+  return days
 }
 
 export async function saveDailyCache(cache: DailyCache): Promise<void> {
@@ -918,8 +1019,11 @@ function addSliceIntoDay(day: DailyEntry, provider: string, slice: ProviderDaySl
   // it pollutes every object in the process.
   const placeholder = Object.hasOwn(day.providers, provider) ? day.providers[provider] : undefined
   const placeholderSessions = placeholder?.sessions ?? 0
-  const merged = structuredClone(slice)
-  if (residual) {
+  // A residual over a fresh slice that carries data is content no surviving
+  // source explains, so it adds to that slice instead of replacing it.
+  const summed = residual && placeholder !== undefined && hasSliceData(placeholder)
+  const merged = summed ? addSliceInto(structuredClone(placeholder), slice) : structuredClone(slice)
+  if (residual && !summed) {
     // The subtraction removed the placeholder's sessions from this residual, so
     // every remaining session is distinct from the placeholder's - add, don't
     // max (max would clamp 1 + 1 to 1 and lose the source-gone session).
@@ -967,6 +1071,7 @@ function addSliceIntoDay(day: DailyEntry, provider: string, slice: ProviderDaySl
     acc.calls += num(p.calls)
     acc.savingsUSD += num(p.savingsUSD)
     if (!acc.path && typeof p.path === 'string') acc.path = p.path
+    if (!acc.originKey && typeof p.originKey === 'string') acc.originKey = p.originKey
     // Same session dedup as the slice-level sessions above: a placeholder's
     // project sessions were already counted into the day when the fresh day
     // was built, so only the excess is added.
@@ -974,6 +1079,7 @@ function addSliceIntoDay(day: DailyEntry, provider: string, slice: ProviderDaySl
     acc.sessions += residual ? num(p.sessions) : Math.max(0, num(p.sessions) - placeholderProjectSessions)
     setOwn(dayProjects, name, acc)
   }
+  if (summed) return
   // Placeholder-only projects (session counted fresh, calls landed elsewhere)
   // survive on the merged slice rather than being dropped by the clone above.
   const mergedProjects = merged.projects
@@ -993,6 +1099,33 @@ function addSliceIntoDay(day: DailyEntry, provider: string, slice: ProviderDaySl
   } else if (placeholder?.projects) {
     merged.projects = structuredClone(placeholder.projects)
   }
+}
+
+function addSliceInto(target: ProviderDaySlice, add: ProviderDaySlice): ProviderDaySlice {
+  for (const key of ['calls', 'cost', 'savingsUSD', 'sessions', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'editTurns', 'oneShotTurns'] as const) {
+    target[key] = (target[key] ?? 0) + (add[key] ?? 0)
+  }
+  for (const [name, m] of Object.entries(add.models ?? {})) {
+    const models = (target.models ??= {})
+    const acc = Object.hasOwn(models, name) ? models[name]! : emptyModelStats()
+    for (const key of REMAINDER_KEYS) acc[key] += m[key] ?? 0
+    setOwn(models, name, acc)
+  }
+  for (const [cat, c] of Object.entries(add.categories ?? {})) {
+    const categories = (target.categories ??= {})
+    const acc = Object.hasOwn(categories, cat) ? categories[cat]! : { turns: 0, cost: 0, savingsUSD: 0, editTurns: 0, oneShotTurns: 0 }
+    for (const key of ['turns', 'cost', 'savingsUSD', 'editTurns', 'oneShotTurns'] as const) acc[key] += c[key] ?? 0
+    setOwn(categories, cat, acc)
+  }
+  for (const [name, p] of Object.entries(add.projects ?? {})) {
+    const projects = (target.projects ??= {})
+    const acc = Object.hasOwn(projects, name) ? projects[name]! : { cost: 0, calls: 0, savingsUSD: 0, sessions: 0 }
+    for (const key of ['cost', 'calls', 'savingsUSD', 'sessions'] as const) acc[key] += num(p[key])
+    if (!acc.path && p.path) acc.path = p.path
+    if (!acc.originKey && p.originKey) acc.originKey = p.originKey
+    setOwn(projects, name, acc)
+  }
+  return target
 }
 
 /// Assign via defineProperty so filesystem-derived keys like "__proto__" become
@@ -1030,9 +1163,10 @@ function subtractSlice(base: ProviderDaySlice, sub: ProviderDaySlice): ProviderD
   const cacheWriteTokens = Math.max(0, (base.cacheWriteTokens ?? 0) - (sub.cacheWriteTokens ?? 0))
   const editTurns = Math.max(0, (base.editTurns ?? 0) - (sub.editTurns ?? 0))
   const oneShotTurns = Math.max(0, (base.oneShotTurns ?? 0) - (sub.oneShotTurns ?? 0))
-  const models = subtractModels(base.models, sub.models)
-  const categories = subtractCategories(base.categories, sub.categories)
-  const projects = subtractProjects(base.projects, sub.projects)
+  const totals = { calls, cost, savingsUSD, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, editTurns, oneShotTurns }
+  const models = capToTotals(subtractModels(base.models, sub.models), totals, REMAINDER_KEYS)
+  const categories = capToTotals(subtractCategories(base.categories, sub.categories), totals, ['cost', 'savingsUSD', 'editTurns', 'oneShotTurns'])
+  const projects = capToTotals(subtractProjects(base.projects, sub.projects), totals, ['cost', 'calls', 'savingsUSD'])
   const out: ProviderDaySlice = {
     calls, cost, savingsUSD,
     ...(sessions > 0 ? { sessions } : {}),
@@ -1047,6 +1181,35 @@ function subtractSlice(base: ProviderDaySlice, sub: ProviderDaySlice): ProviderD
     ...(projects ? { projects } : {}),
   }
   return hasSliceData(out) || (out.sessions ?? 0) > 0 ? out : null
+}
+
+/// Entries are subtracted key by key, so content the fresh parse files under a
+/// key the base lacks (a pre-v67 label-only project, a project now split per
+/// worktree, a renamed model) leaves the base's entry whole and the breakdown
+/// outgrows the residual. Scale each field back to the residual's own total,
+/// keeping whole counts whole; the old keys are the only identity that content has.
+function capToTotals<T extends object>(entries: Record<string, T> | undefined, totals: Record<string, number>, keys: readonly string[]): Record<string, T> | undefined {
+  if (!entries) return undefined
+  // Untouched entries are still the base's own objects.
+  const rows = Object.entries(entries).map(([name, r]) => {
+    const copy = { ...r }
+    setOwn(entries, name, copy)
+    return copy as unknown as Record<string, number>
+  })
+  for (const key of keys) {
+    const total = totals[key] ?? 0
+    const sum = rows.reduce((s, r) => s + num(r[key]), 0)
+    if (sum <= total) continue
+    for (const r of rows) r[key] = num(r[key]) * total / sum
+    if (key === 'cost' || key === 'savingsUSD') continue
+    let left = total
+    for (const r of rows) left -= (r[key] = Math.floor(r[key]!))
+    rows.reduce((a, b) => (b[key]! > a[key]! ? b : a))[key]! += left
+  }
+  for (const [name, r] of Object.entries(entries)) {
+    if (Object.values(r).every(v => typeof v !== 'number' || v === 0)) delete entries[name]
+  }
+  return Object.keys(entries).length > 0 ? entries : undefined
 }
 
 function subtractModelStats(base: ModelDayStats, sub: ModelDayStats): ModelDayStats | null {
@@ -1099,7 +1262,7 @@ function subtractProjectStats(base: ProjectDayStats, sub: ProjectDayStats): Proj
   const savingsUSD = Math.max(0, (base.savingsUSD ?? 0) - (sub.savingsUSD ?? 0))
   const sessions = Math.max(0, (base.sessions ?? 0) - (sub.sessions ?? 0))
   if (cost === 0 && calls === 0 && savingsUSD === 0 && sessions === 0) return null
-  return { cost, calls, savingsUSD, sessions, ...(base.path ? { path: base.path } : {}) }
+  return { cost, calls, savingsUSD, sessions, ...(base.path ? { path: base.path } : {}), ...(base.originKey ? { originKey: base.originKey } : {}) }
 }
 
 function subtractProjects(base: DailyEntry['projects'] | undefined, sub: DailyEntry['projects'] | undefined): DailyEntry['projects'] | undefined {
@@ -1210,6 +1373,25 @@ function subtractSliceFromDay(day: DailyEntry, provider: string, sub: ProviderDa
     if (reducedP) setOwn(day.projects, name, reducedP)
     else delete day.projects[name]
   }
+}
+
+/// A Cursor usage import stands in for the replaced providers on the days it
+/// covers, and the parse drops their local calls there. A cached slice of one
+/// of them on such a day is an old local estimate no parse produces again, so
+/// merging it would stack it on the imported rows. Days before the backfill
+/// window stay: the re-derive cannot rebuild their imported rows.
+async function withoutImportReplacedSlices(days: DailyEntry[]): Promise<DailyEntry[]> {
+  const coverage = await loadCursorImport().then(s => s && coverageFor(s), () => null)
+  if (!coverage) return days
+  const now = new Date()
+  const backfillStart = toDateString(new Date(now.getFullYear(), now.getMonth(), now.getDate() - BACKFILL_DAYS))
+  return days.flatMap(day => {
+    const replaced = Object.keys(day.providers).filter(p => coverage.providers.has(p))
+    if (replaced.length === 0 || day.date < backfillStart || !coversLocalDay(coverage, day.date)) return [day]
+    const copy = structuredClone(day)
+    for (const provider of replaced) subtractSliceFromDay(copy, provider, copy.providers[provider]!)
+    return hasPositiveDayContent(copy) ? [copy] : []
+  })
 }
 
 /// Did the tz subtraction leave any positive data on a carried baseline day?
@@ -1349,9 +1531,14 @@ export function mergeDayEntries(
   /// a slice it could not produce at all is carried by the branch above,
   /// exactly as before.
   pendingRederive?: ReadonlySet<string>,
+  /// Days before this date count as settled for the guard even inside the
+  /// settle window: the gap path passes its first unsealed day, so a day it
+  /// re-derives after sealing it before can grow or re-price but never shrink.
+  sealedBefore?: string,
 ): DailyEntry[] {
   const byDate = new Map<string, DailyEntry>()
-  const settleCutoff = settleCutoffDate(new Date())
+  const windowCutoff = settleCutoffDate(new Date())
+  const settleCutoff = sealedBefore && sealedBefore > windowCutoff ? sealedBefore : windowCutoff
   for (const day of primary) byDate.set(day.date, structuredClone(day))
   for (const day of secondary) {
     const existing = byDate.get(day.date)
@@ -1423,7 +1610,6 @@ export function mergeDayEntries(
 /// slices over.
 export async function invalidateProviderDays(providers: readonly string[], start: string, end: string): Promise<void> {
   await withDailyCacheLock(async () => {
-    if (!existsSync(getCachePath())) return
     const c = await loadDailyCache()
     for (const day of c.days) {
       if (day.date < start || day.date > end) continue
@@ -1654,10 +1840,14 @@ export async function ensureCacheHydrated(
       // from each carried baseline slice the content the fresh parse still
       // attributes to that (date, provider) under the OLD bucketing: the turns
       // that re-bucketed across local midnight. That is the issue #770
-      // double-count; re-pricing drift (a savings-hash change) must never be
-      // subtracted, so a hash change in the same re-derive skips this entirely.
+      // double-count. Re-pricing drift (a savings-hash change) must never be
+      // subtracted, so with a hash change in the same re-derive every baseline
+      // slice a surviving source touches under the old bucketing is dropped
+      // whole and the fresh parse wins there: a tz change must never inflate,
+      // even if that loses the source-gone part of a partly surviving slice.
       let tzSubtraction: ReadonlyMap<string, ReadonlyMap<string, ProviderDaySlice>> | undefined
-      if (parseWasComplete && tzChanged && c.savingsConfigHash === savingsConfigHash && aggregateDaysInTz && c.tzKey !== undefined) {
+      let carriedBaseline = baseline
+      if (parseWasComplete && tzChanged && aggregateDaysInTz && c.tzKey !== undefined) {
         // The subtraction re-parses THROUGH NOW (fix round 1): a call bucketed
         // to OLD-tz yesterday that re-buckets to NEW-tz TODAY sits past the
         // history parse's yesterdayEnd, so `freshUnderOldTz` built from `projects`
@@ -1667,11 +1857,38 @@ export async function ensureCacheHydrated(
         // days written to the cache stay exactly the history days and today is
         // still owned by the caller's live parse.
         const wideProjects = await parseSessions({ start: backfillStart, end: now })
-        tzSubtraction = buildTzSubtraction(aggregateDaysInTz(wideProjects, c.tzKey))
+        const freshUnderOldTz = buildTzSubtraction(aggregateDaysInTz(wideProjects, c.tzKey))
+        if (c.savingsConfigHash === savingsConfigHash) {
+          tzSubtraction = freshUnderOldTz
+        } else {
+          carriedBaseline = structuredClone(baseline)
+          for (const day of carriedBaseline) {
+            for (const [provider, slice] of Object.entries(day.providers)) {
+              const explained = freshUnderOldTz.get(day.date)?.get(provider)
+              if (explained && hasSliceData(explained)) subtractSliceFromDay(day, provider, slice)
+            }
+          }
+          carriedBaseline = carriedBaseline.filter(hasPositiveDayContent)
+        }
       }
       const pendingRederive = c.pendingRederive?.length ? new Set(c.pendingRederive) : undefined
+      // v73 moved Cursor IDE chat transcripts from cursor-agent to cursor. A day
+      // the fresh parse explains with a cursor slice and no cursor-agent slice
+      // is that move, not pruned history, so the old cursor-agent slice goes.
+      if (parseWasComplete && pendingRederive?.has('cursor-agent')) {
+        const freshProviders = new Map(freshDays.map(d => [d.date, d.providers]))
+        carriedBaseline = carriedBaseline.flatMap(day => {
+          const fresh = freshProviders.get(day.date)
+          if (!day.providers['cursor-agent'] || !fresh || fresh['cursor-agent'] || !fresh['cursor'] || !hasSliceData(fresh['cursor'])) return [day]
+          const copy = structuredClone(day)
+          subtractSliceFromDay(copy, 'cursor-agent', copy.providers['cursor-agent'])
+          return hasPositiveDayContent(copy) ? [copy] : []
+        })
+      }
+      // Without the subtraction an old-zone slice is never a partial survivor
+      // of the fresh one, so the guard would swap a shifted day back in.
       const merged = parseWasComplete
-        ? mergeDayEntries(freshDays, baseline, true, tzSubtraction, true, pendingRederive)
+        ? mergeDayEntries(freshDays, await withoutImportReplacedSlices(carriedBaseline), true, tzSubtraction, !tzChanged || tzSubtraction !== undefined, pendingRederive)
         : mergeDayEntries(baseline, freshDays, false)
       // Only the complete re-derive re-parses the whole window, so freshDays is
       // the authoritative record set and every non-carried merged day should be
@@ -1720,8 +1937,24 @@ export async function ensureCacheHydrated(
       : new Date(now.getFullYear(), now.getMonth(), now.getDate() - BACKFILL_DAYS)
 
     if (gapStart.getTime() <= yesterdayEnd.getTime()) {
-      const gapRange: DateRange = { start: gapStart, end: yesterdayEnd }
-      const gapProjects = await parseSessions(gapRange)
+      // Sealing a new day also re-derives the still-settling ones before it. A
+      // day sealed once is otherwise frozen, while every surface that parses
+      // that date live (report --day, a week period) prefers the live parse
+      // whenever it finds more calls: a call that landed after the seal, or a
+      // price change since, then made history.daily disagree with report for
+      // the same date. The merge below lets the fresh parse win there when it
+      // explains at least as many calls; a sealed day never shrinks, since a
+      // transcript cleaned up or a partial provider sync looks the same.
+      const settleStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - SETTLE_DAYS)
+      const gapRange: DateRange = { start: settleStart < gapStart ? settleStart : gapStart, end: yesterdayEnd }
+      // A re-derived window starts on a day sealed together with the day before
+      // it, which already holds any turn crossing that midnight. Parse from that
+      // day so the turn stays whole there instead of being cut and its later
+      // part counted again on the window start.
+      const parseStart = settleStart < gapStart
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - SETTLE_DAYS - 1)
+        : gapStart
+      const gapProjects = await parseSessions({ start: parseStart, end: yesterdayEnd })
       const gapDays = daysInRange(aggregateDays(gapProjects), gapRange)
       const parseWasComplete = sessionComplete()
       const priorWatermark = c.lastComputedDate
@@ -1734,7 +1967,7 @@ export async function ensureCacheHydrated(
       // partial one only fills days and slices the baseline lacks, so the gap
       // merge is strictly additive and no cached data can shrink.
       const merged = parseWasComplete
-        ? mergeDayEntries(gapDays, c.days, false, undefined, true)
+        ? mergeDayEntries(gapDays, c.days, false, undefined, true, undefined, toDateString(gapStart))
         : mergeDayEntries(c.days, gapDays, false)
       // Finalize as complete ONLY when the session parse that produced these days
       // was itself complete. If it was partial, leave `complete: false` so the
@@ -1767,8 +2000,8 @@ export function cachedProjectIdentities(cache: DailyCache, startStr: string, end
   const identities: ProjectFilterTarget[] = []
   for (const day of cache.days) {
     if (day.date < startStr || day.date > endStr || !day.projects) continue
-    for (const [name, stats] of Object.entries(day.projects)) {
-      identities.push({ project: name, projectPath: stats.path ?? '' })
+    for (const [key, stats] of Object.entries(day.projects)) {
+      identities.push(projectDayIdentity(key, stats))
     }
   }
   return identities

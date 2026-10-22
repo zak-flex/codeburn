@@ -2,20 +2,26 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, s
 import path from 'node:path'
 
 import { createBridgeHandlers as createHandlers, NO_UPDATE_STATUS, type Deps, type Handler } from './bridge-handlers'
-import { reapOrphanServe, resolveCodeburnPath, serveUsage, shutdownAll, spawnCli, spawnCliAction, startServe } from './cli'
+import { killAll, reapOrphanServe, resolveCodeburnPath, serveUsage, shutdownAll, spawnCli, spawnCliAction, startServe } from './cli'
 import { MenubarCompanion, readDockEnabled, STARTUP_APPS_SETTINGS_URL } from './menubar'
 import { MacMenubar, type InstallPhase } from './mac-menubar'
 import { getQuota } from './quota'
 import { Telemetry } from './telemetry'
+import { autoUpdateSupported, createAutoUpdateChecker, releaseFeedOverride, type AutoUpdateChecker } from './auto-update'
+import { createCompanionUpdater, type CompanionUpdater, type CompanionUpdateStatus } from './companion-update'
 import { createUpdateChecker, type UpdateChecker, type UpdateStatus } from './updates'
 
 // Initialized in bootstrap() once Electron paths exist; stays null under tests.
 let telemetryInstance: Telemetry | null = null
 // The once-per-launch + 24h update-availability checker. Null under tests.
 let updateChecker: UpdateChecker | null = null
+// Set instead of a link-only checker where the install can replace itself.
+let autoUpdate: AutoUpdateChecker | null = null
 // The bundled tray app and its Capacity Dock (Windows only). Null under tests.
 let companion: MenubarCompanion | null = null
 let macMenubar: MacMenubar | null = null
+// Brings the menubar app and the global CLI up to the desktop's version. Null under tests.
+let companionUpdate: CompanionUpdater | null = null
 
 export {
   appleLanguageFor, exportedPath, makeProgressReader, NO_COMPANION, NO_COMPANION_ACTION,
@@ -25,20 +31,47 @@ export type { Envelope, ProjectFilter, TelemetryBridge } from './bridge-handlers
 
 type QuitTelemetry = Pick<Telemetry, 'trackClose' | 'flush'>
 type BeforeQuitEvent = { preventDefault: () => void }
-type BeforeQuitDeps = {
+type QuitFlushDeps = {
   getTelemetry: () => QuitTelemetry | null
   killAll: () => void | Promise<void>
-  quit: () => void
   timeoutMs?: number
 }
+type BeforeQuitDeps = QuitFlushDeps & { quit: () => void }
 
 const QUIT_FLUSH_TIMEOUT_MS = 1500
+
+/** Track app_close, flush telemetry and stop the CLI children, bounded by the timeout. Never rejects. */
+export async function flushForQuit(deps: QuitFlushDeps): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    let childCleanup: Promise<unknown> = Promise.resolve()
+    try { childCleanup = Promise.resolve(deps.killAll()).catch(() => undefined) } catch { /* child cleanup must not wedge quit */ }
+
+    let telemetry: QuitTelemetry | null = null
+    try { telemetry = deps.getTelemetry() } catch { /* telemetry lookup is best-effort */ }
+
+    let flush: Promise<unknown> = Promise.resolve(false)
+    if (telemetry) {
+      try { telemetry.trackClose() } catch { /* flush the existing queue anyway */ }
+      try { flush = Promise.resolve(telemetry.flush()) } catch { /* use the resolved fallback */ }
+    }
+
+    const timeout = new Promise<void>(resolve => {
+      timer = setTimeout(resolve, deps.timeoutMs ?? QUIT_FLUSH_TIMEOUT_MS)
+    })
+    await Promise.race([
+      Promise.all([flush.catch(() => false), childCleanup]),
+      timeout,
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
 
 /** Intercept one quit pass, then allow the re-entrant pass after a bounded flush. */
 export function createBeforeQuitHandler(deps: BeforeQuitDeps): (event: BeforeQuitEvent) => void {
   let flushStarted = false
   let allowQuit = false
-  let closeTracked = false
 
   return event => {
     if (allowQuit) return
@@ -46,38 +79,45 @@ export function createBeforeQuitHandler(deps: BeforeQuitDeps): (event: BeforeQui
     if (flushStarted) return
     flushStarted = true
 
-    void (async () => {
-      let timer: ReturnType<typeof setTimeout> | undefined
-      try {
-        let childCleanup: Promise<unknown> = Promise.resolve()
-        try { childCleanup = Promise.resolve(deps.killAll()).catch(() => undefined) } catch { /* child cleanup must not wedge quit */ }
-
-        let telemetry: QuitTelemetry | null = null
-        try { telemetry = deps.getTelemetry() } catch { /* telemetry lookup is best-effort */ }
-
-        let flush: Promise<unknown> = Promise.resolve(false)
-        if (telemetry) {
-          if (!closeTracked) {
-            closeTracked = true
-            try { telemetry.trackClose() } catch { /* flush the existing queue anyway */ }
-          }
-          try { flush = Promise.resolve(telemetry.flush()) } catch { /* use the resolved fallback */ }
-        }
-
-        const timeout = new Promise<void>(resolve => {
-          timer = setTimeout(resolve, deps.timeoutMs ?? QUIT_FLUSH_TIMEOUT_MS)
-        })
-        await Promise.race([
-          Promise.all([flush.catch(() => false), childCleanup]),
-          timeout,
-        ])
-      } finally {
-        if (timer !== undefined) clearTimeout(timer)
-        allowQuit = true
-        try { deps.quit() } catch { /* a throwing quit call must not reset the guard */ }
-      }
-    })()
+    void flushForQuit(deps).finally(() => {
+      allowQuit = true
+      try { deps.quit() } catch { /* a throwing quit call must not reset the guard */ }
+    })
   }
+}
+
+/**
+ * The quit handler plus the flush an update install runs first. quitAndInstall quits through
+ * before-quit, and a handler that defers that quit cancels it, so the install flushes up front
+ * and every quit after that passes straight through.
+ */
+export function createQuitPath(deps: BeforeQuitDeps): {
+  beforeQuit: (event: BeforeQuitEvent) => void
+  beforeInstall: () => Promise<void>
+  /** The install did not quit the app: the next quit flushes again. */
+  cancelInstall: () => void
+} {
+  let installing = false
+  const handler = createBeforeQuitHandler(deps)
+  return {
+    beforeQuit: event => { if (!installing) handler(event) },
+    beforeInstall: async () => {
+      await flushForQuit(deps)
+      installing = true
+    },
+    cancelInstall: () => { installing = false },
+  }
+}
+
+/** Passed by the menubar and the CLI engine to have this app update itself (design 2.1, step 4). */
+export const UPDATE_FLAG = '--codeburn-update'
+
+/** Check, then download; the download restarts into the update once it lands. Where this install
+ *  cannot replace itself there is no checker, and the window's banner is all there is. */
+export async function handOffUpdate(checker: Pick<AutoUpdateChecker, 'check' | 'download'> | null, onStatus: (status: UpdateStatus) => void): Promise<void> {
+  if (!checker) return
+  onStatus(await checker.check())
+  await checker.download()
 }
 
 // IPC channel carrying cold-start scan-progress events to the splash.
@@ -86,6 +126,7 @@ export const PROGRESS_CHANNEL = 'codeburn:progress'
 export const MAC_MENUBAR_PROGRESS_CHANNEL = 'codeburn:macMenubarProgress'
 // IPC channel pushing update-availability status to open windows (launch + 24h).
 export const UPDATE_CHANNEL = 'codeburn:update'
+export const COMPANION_UPDATE_CHANNEL = 'codeburn:companionUpdate'
 
 
 function broadcastProgress(event: unknown): void {
@@ -100,9 +141,15 @@ function broadcastUpdateStatus(status: UpdateStatus): void {
   }
 }
 
+function broadcastCompanionUpdate(status: CompanionUpdateStatus): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(COMPANION_UPDATE_CHANNEL, status)
+  }
+}
 
 
-export function createBridgeHandlers(deps: Deps = { spawnCli, spawnCliAction, resolveCodeburnPath, getQuota, emitProgress: broadcastProgress, telemetry: telemetryInstance, getUpdateStatus: () => updateChecker ? updateChecker.getStatus() : Promise.resolve(NO_UPDATE_STATUS), companion: companion, macMenubar: macMenubar, stateDir: app.getPath('userData'), appVersion: app.getVersion(), isOnBatteryPower: () => powerMonitor.isOnBatteryPower() }): Record<string, Handler> {
+
+export function createBridgeHandlers(deps: Deps = { spawnCli, spawnCliAction, resolveCodeburnPath, getQuota, emitProgress: broadcastProgress, telemetry: telemetryInstance, getUpdateStatus: () => updateChecker ? updateChecker.getStatus() : Promise.resolve(NO_UPDATE_STATUS), downloadUpdate: () => autoUpdate ? autoUpdate.download() : Promise.resolve(NO_UPDATE_STATUS), installUpdate: () => autoUpdate?.install(), companionUpdateStatus: () => companionUpdate?.status() ?? null, updateCompanions: () => companionUpdate?.run(), companion: companion, macMenubar: macMenubar, stateDir: app.getPath('userData'), appVersion: app.getVersion(), isOnBatteryPower: () => powerMonitor.isOnBatteryPower() }): Record<string, Handler> {
   return createHandlers(deps)
 }
 
@@ -273,18 +320,20 @@ function bootstrap(): void {
     app.quit()
     return
   }
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    if (argv.includes(UPDATE_FLAG)) void handOffUpdate(autoUpdate, broadcastUpdateStatus)
     const [win] = BrowserWindow.getAllWindows()
     if (!win) return
     if (win.isMinimized()) win.restore()
     win.focus()
   })
 
-  app.on('before-quit', createBeforeQuitHandler({
+  const quitPath = createQuitPath({
     getTelemetry: () => telemetryInstance,
     killAll: shutdownAll,
     quit: () => app.quit(),
-  }))
+  })
+  app.on('before-quit', quitPath.beforeQuit)
 
   void app.whenReady().then(() => {
     // Start the resident child early, but issue no artificial warm-up query:
@@ -307,6 +356,7 @@ function bootstrap(): void {
         getAppMetrics: () => app.getAppMetrics(),
         getServeUsage: serveUsage,
       })
+      telemetryInstance.settleUpdate(app.getVersion())
       // completeOnboarding tracks the first app_open itself; only already-
       // onboarded installs record subsequent opens here. app_open carries the
       // Capacity Dock state (on/off/none) so dock adoption is measurable.
@@ -336,7 +386,7 @@ function bootstrap(): void {
       platform: process.platform,
       env: process.env,
     })
-    void companion.bootstrap().catch(err => console.error('menubar bootstrap failed:', err))
+    const trayBootstrapped = companion.bootstrap().catch(err => console.error('menubar bootstrap failed:', err))
     // No bootstrap: nothing is installed, moved or launched until the card asks.
     macMenubar = new MacMenubar({
       platform: process.platform,
@@ -374,15 +424,61 @@ function bootstrap(): void {
     })
 
     // Update availability: check once at launch, then every 24h, pushing each
-    // result to any open window. Never downloads/installs (unsigned builds);
-    // errors are swallowed inside the checker as a silent no-op.
-    updateChecker = createUpdateChecker({
-      currentVersion: app.getVersion(),
-      storeManaged: (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true,
-    })
+    // result to any open window. Signed mac builds and the AppImage download and
+    // install on the reader's click; everything else gets a download link.
+    // Errors are swallowed inside the checkers as a silent no-op.
+    const windowsStore = (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true
+    if (autoUpdateSupported({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      mas: (process as NodeJS.Process & { mas?: boolean }).mas === true,
+      windowsStore,
+      appImage: process.env.APPIMAGE,
+    })) {
+      // Loaded only here: electron-updater picks a platform updater as soon as it is touched.
+      const { autoUpdater } = require('electron-updater') as typeof import('electron-updater')
+      // The end-to-end test's local feed; ignored unless it is on the allow-list.
+      const feed = releaseFeedOverride(process.env.CODEBURN_RELEASE_BASE)
+      if (feed) autoUpdater.setFeedURL({ provider: 'generic', url: feed })
+      autoUpdate = createAutoUpdateChecker({
+        updater: autoUpdater,
+        currentVersion: app.getVersion(),
+        onChange: broadcastUpdateStatus,
+        onDownloadFail: (outcome, from, to) => telemetryInstance?.track('update_result', { from, to, outcome }),
+        onInstall: (from, to) => telemetryInstance?.noteUpdateInstall(from, to),
+        beforeQuit: quitPath.beforeInstall,
+        // The app is still here: undo the quit flush so the CLI and serve work again.
+        onInstallFail: () => {
+          quitPath.cancelInstall()
+          killAll()
+          startServe(servePidFile)
+        },
+      })
+      updateChecker = autoUpdate
+    } else {
+      updateChecker = createUpdateChecker({ currentVersion: app.getVersion(), storeManaged: windowsStore })
+    }
+    if (process.argv.includes(UPDATE_FLAG)) void handOffUpdate(autoUpdate, broadcastUpdateStatus)
     const runUpdateCheck = () => { void updateChecker?.check().then(broadcastUpdateStatus) }
     runUpdateCheck()
     setInterval(runUpdateCheck, 24 * 60 * 60 * 1000)
+
+    // Companions follow the desktop. Packaged only: a dev build's CLI is the repo's, and its
+    // version says nothing about what should be installed. Windows waits for the tray install
+    // so msiexec and npm never run at once.
+    companionUpdate = createCompanionUpdater({
+      appVersion: app.getVersion(),
+      platform: process.platform,
+      stateDir: app.getPath('userData'),
+      readMenubarVersion: async () => (macMenubar ? (await macMenubar.status()).version : null),
+      runCli: spawnCliAction,
+      onChange: broadcastCompanionUpdate,
+      track: props => telemetryInstance?.track('update_result', props),
+    })
+    if (app.isPackaged) {
+      setTimeout(() => { void trayBootstrapped.then(() => companionUpdate?.start()) }, 15_000)
+      setInterval(() => { void companionUpdate?.check() }, 24 * 60 * 60 * 1000)
+    }
   })
 
   app.on('window-all-closed', () => {

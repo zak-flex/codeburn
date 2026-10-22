@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { ancestorsOf, replaceAndRelaunch, runningAppPids } from '../src/menubar-installer.js'
+import { ancestorsOf, pidsBelowApp, replaceAndRelaunch, runningAppPids } from '../src/menubar-installer.js'
 
 describe('ancestorsOf', () => {
   const ps = ['  1     0', ' 50     1', ' 60    50', ' 70    60', ' 80     1', ''].join('\n')
@@ -24,6 +24,18 @@ describe('ancestorsOf', () => {
   it('stops on a cycle and on an unknown pid', () => {
     expect([...ancestorsOf(2, ' 2 3\n 3 2\n')]).toEqual([3, 2])
     expect(ancestorsOf(999, ps).size).toBe(0)
+  })
+})
+
+describe('pidsBelowApp', () => {
+  const ps = ['  1     0', ' 40     1', ' 50    40', ' 60    50', ' 70    60', ''].join('\n')
+
+  it('waits on the re-run engine and its parent, not the app or above', () => {
+    expect(pidsBelowApp(70, [50], ancestorsOf(70, ps))).toEqual([70, 60])
+  })
+
+  it('is just this process when the app is its parent', () => {
+    expect(pidsBelowApp(60, [50], ancestorsOf(60, ps))).toEqual([60])
   })
 })
 

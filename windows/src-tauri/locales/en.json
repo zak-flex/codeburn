@@ -29,5 +29,18 @@
   "Today · %1$@ · %2$@": "Today · %1$@ · %2$@",
   "Today · no usage yet": "Today · no usage yet",
   "Top": "Top",
-  "Week": "Week"
+  "Week": "Week",
+  "Updating the CLI...": "Updating the CLI...",
+  "CLI updated to %@.": "CLI updated to %@.",
+  "The CLI is up to date.": "The CLI is up to date.",
+  "No global CLI found.": "No global CLI found.",
+  "Another CodeBurn update is already running.": "Another CodeBurn update is already running.",
+  "CLI %@ is not on npm yet. Try again in a few minutes.": "CLI %@ is not on npm yet. Try again in a few minutes.",
+  "CodeBurn is not allowed to change the CLI folder. Run this in a terminal:": "CodeBurn is not allowed to change the CLI folder. Run this in a terminal:",
+  "CodeBurn could not tell how the CLI was installed. Run this in a terminal:": "CodeBurn could not tell how the CLI was installed. Run this in a terminal:",
+  "The CLI update failed. Run this in a terminal:": "The CLI update failed. Run this in a terminal:",
+  "The CLI update did not run. Run this in a terminal:": "The CLI update did not run. Run this in a terminal:",
+  "Your package manager updates this CLI.": "Your package manager updates this CLI.",
+  "Opening CodeBurn to update the desktop app.": "Opening CodeBurn to update the desktop app.",
+  "Update CLI": "Update CLI"
 }

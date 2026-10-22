@@ -298,6 +298,20 @@ describe('notFoundStage (non-sensitive telemetry enum for a not-found)', () => {
     expect(notFoundStage()).toBe('bundled-missing')
   })
 
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('reports bundled-denied when the bundled CLI exists but cannot be stat-ed', () => {
+    delete process.env.CODEBURN_BIN
+    const locked = join(dir, 'locked')
+    mkdirSync(locked)
+    writeFileSync(join(locked, 'launch.js'), '')
+    chmodSync(locked, 0o000)
+    process.env.CODEBURN_BUNDLED_CLI = join(locked, 'launch.js')
+    try {
+      expect(notFoundStage()).toBe('bundled-denied')
+    } finally {
+      chmodSync(locked, 0o755)
+    }
+  })
+
   it('reports bin-not-absolute for a relative CODEBURN_BIN override', () => {
     process.env.CODEBURN_BIN = 'relative/codeburn'
     delete process.env.CODEBURN_BUNDLED_CLI
@@ -460,7 +474,7 @@ describe('spawnCli', () => {
 
   it('rejects with kind "nonzero" on a non-zero exit', async () => {
     fakeBin('fail.js', 'process.stderr.write("boom"); process.exit(2)')
-    await expect(spawnCli(['status'])).rejects.toMatchObject({ kind: 'nonzero' } satisfies Partial<CliError>)
+    await expect(spawnCli(['status'])).rejects.toMatchObject({ kind: 'nonzero', exit: '2' } satisfies Partial<CliError>)
   })
 
   it('rejects with kind "bad-json" on non-JSON stdout', async () => {

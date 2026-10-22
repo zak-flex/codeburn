@@ -24,9 +24,9 @@ jobs:
   appx:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22.13.0
           cache: npm
@@ -43,11 +43,12 @@ jobs:
 
       # The Store package ships the tray exe: stage-menubar.mjs takes it from
       # windows/src-tauri/target/release, so no MSI bundle is needed here.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: windows/src-tauri
 
@@ -57,13 +58,14 @@ jobs:
 
       - name: Build tray app
         working-directory: windows
-        run: npm run tauri build -- --no-bundle
+        shell: bash
+        run: npm run tauri build -- --no-bundle --no-sign
 
       - name: Build Microsoft Store package
         run: npm --prefix app run package:store
 
       - name: Upload Store package
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: CodeBurn-Microsoft-Store
           path: app/release/CodeBurn-Store-*.appx

@@ -144,6 +144,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // `--quit` with nothing running: this launch is the instance being asked to go,
             // so it goes without ever showing anything. It cannot be answered before the
@@ -171,6 +172,7 @@ pub fn run() {
             // `track` is silent until this has run, so it comes before anything that reports.
             telemetry::init(app.package_info().version.to_string());
             telemetry::track("app_open", serde_json::Value::Null);
+            update::settle_pending_update(&app.package_info().version.to_string());
             tauri::async_runtime::spawn(async {
                 // The queue is offered on the beat rather than at launch, so starting up
                 // never costs a request on its own. After a failed send the wait is the
@@ -298,6 +300,9 @@ pub fn run() {
             commands::set_provider_key,
             commands::usage_refresh_plan,
             commands::check_updates,
+            commands::download_update,
+            commands::install_update,
+            commands::update_cli,
             commands::telemetry_track,
             commands::telemetry_status,
             commands::telemetry_set_enabled,
@@ -1019,8 +1024,7 @@ mod commands {
     /// without restarting the tray app.
     #[tauri::command]
     pub async fn cli_status(state: State<'_, AppState>) -> Result<crate::cli::CliStatus, String> {
-        let fresh = crate::cli::CodeburnCli::resolve();
-        let status = fresh.status().await;
+        let (fresh, status) = crate::cli::CodeburnCli::probe().await;
         if status.found {
             if let Ok(mut guard) = state.cli.lock() {
                 *guard = fresh;
@@ -1112,7 +1116,11 @@ mod commands {
     /// shell, but it does become a directory name, so it is checked here rather than trusted:
     /// digits and hyphens only, and the length the format produces.
     #[tauri::command]
-    pub async fn export_usage(format: String, stamp: String) -> Result<String, String> {
+    pub async fn export_usage(
+        state: State<'_, AppState>,
+        format: String,
+        stamp: String,
+    ) -> Result<String, String> {
         if !matches!(format.as_str(), "csv" | "json") {
             return Err("unknown export format".into());
         }
@@ -1129,7 +1137,7 @@ mod commands {
             _ => format!("codeburn-{stamp}"),
         };
         let output = downloads.join(name);
-        let cli = crate::cli::CodeburnCli::resolve();
+        let cli = state.cli.lock().map_err(|e| e.to_string())?.clone();
         cli.export_to(&format, &output)
             .await
             .map_err(|e| e.to_string())?;
@@ -1530,7 +1538,7 @@ mod commands {
 
     /// Whether there is a newer app or CLI, and how the reader installs it. Without `force`
     /// a cached answer inside the two-day interval is returned without touching the network,
-    /// so every mount can ask. Nothing here installs anything: see `update.rs`.
+    /// so every mount can ask. Installing is `download_update` then `install_update`.
     #[tauri::command]
     pub async fn check_updates(
         app: AppHandle,
@@ -1539,6 +1547,30 @@ mod commands {
     ) -> Result<crate::update::UpdateStatus, String> {
         let cli = state.cli.lock().map_err(|e| e.to_string())?.clone();
         Ok(crate::update::check(&app, &cli, force).await)
+    }
+
+    /// Fetches the release the signed feed names and verifies its signature. Installs nothing.
+    #[tauri::command]
+    pub async fn download_update(app: AppHandle) -> Result<(), String> {
+        crate::update::download(&app)
+            .await
+            .map_err(|e| crate::update::scrub(&e.to_string()))
+    }
+
+    /// Updates the global CLI through `codeburn update` and hands off to an installed desktop
+    /// app. Progress arrives on `codeburn://cli-update`.
+    #[tauri::command]
+    pub async fn update_cli(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+        let cli = state.cli.lock().map_err(|e| e.to_string())?.clone();
+        crate::update::update_cli(&app, &cli)
+            .await
+            .map_err(|e| crate::update::scrub(&e.to_string()))
+    }
+
+    /// Runs the verified installer and restarts into the new version.
+    #[tauri::command]
+    pub fn install_update(app: AppHandle) -> Result<(), String> {
+        crate::update::install(&app).map_err(|e| crate::update::scrub(&e.to_string()))
     }
 
     /// One event from a page. The module decides whether it may be recorded at all: an

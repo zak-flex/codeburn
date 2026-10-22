@@ -1,13 +1,14 @@
 import { isAbsolute } from 'path'
 import { Command, Option } from 'commander'
 import { installMenubarApp, uninstallMenubarApp } from './menubar-installer.js'
+import { COMPONENTS, defaultUpdateDeps, runUpdate, type Component } from './update.js'
 import { exportCsv, exportJson, type PeriodExport } from './export.js'
 import { findUnpricedModels, modelRowKey, loadPricing, sanitizeModelForDisplay, setModelAliases, setPriceOverrides, setLocalModelSavings, setFlatRateModels, setFlatRateRemoved, setProxyPaths, normalizeProxyPath, unpricedModelHint, isBuiltInFlatRateModel, isSameFlatRateModel, getProxyPathsConfigHash, getModelAliasesConfigHash, getPriceOverridesConfigHash, getLocalModelSavingsConfigHash, getFlatRateModelsConfigHash, getPricingGenerationKey } from './models.js'
 import { cachedProjectIdentitiesForRange } from './daily-cache.js'
 import { reportUnmatchedProjectPatterns } from './project-filter-warnings.js'
 import { getVercelGatewayApiKey } from './providers/vercel-gateway.js'
 import { BILLING_FILTER_VALUES, ROUTE_FILTER_VALUES, filterProjectsByBillingRoute } from './billing-filter.js'
-import { AGGREGATE_ONLY_PROVIDER, aggregateOnlyCostUSD, excludesAggregateOnlyProviders, parseAllSessions, filterProjectsByName, filterProjectsByDateRange, clearSessionCache, setInteractiveScanUI, computeCorpusFingerprint, isSessionHydrationComplete, startProgressKeepalive, stopProgressKeepalive, withLoadWindow } from './parser.js'
+import { AGGREGATE_ONLY_PROVIDER, aggregateOnlyCostUSD, excludesAggregateOnlyProviders, parseAllSessions, filterProjectsByName, filterProjectsByDateRange, mergeProjectSplits, clearSessionCache, setInteractiveScanUI, computeCorpusFingerprint, isSessionHydrationComplete, startProgressKeepalive, stopProgressKeepalive, withLoadWindow, setExactProjectPaths } from './parser.js'
 import { allProviderNames, getAllProviders, safeDiscoverSessions } from './providers/index.js'
 import { getProvider } from './providers/index.js'
 import { getClaudeConfigDirs, getDesktopSessionsDirs } from './providers/claude.js'
@@ -16,19 +17,19 @@ import { ESTIMATED_COST_LEGEND, excludedGatewayNote, formatTokens, isEstimatedCo
 import { toDateString } from './daily-cache.js'
 import { statusSnapshotSemanticKey } from './status-snapshot-semantic.js'
 import { dateKey } from './day-aggregator.js'
-import { inferSessionProvider } from './session-output.js'
+import { foldedSessionRows } from './sessions-report.js'
 import { behavioralCallWeight } from './behavioral-weight.js'
 import { CATEGORY_LABELS, type DateRange, type ProjectSummary, type TaskCategory } from './types.js'
 import type { AppliedFix } from './act/types.js'
 import { aggregateModelEfficiency } from './model-efficiency.js'
-import { buildPeriodData, buildMenubarPayloadForRange, buildDurablePeriod, getDailyCacheConfigHash, SERVE_HYDRATION_ENV, type DurablePeriod } from './usage-aggregator.js'
-import { aggregateProjectsIntoDays } from './day-aggregator.js'
+import { buildPayloadProjects, buildPeriodData, buildMenubarPayloadForRange, buildDurablePeriod, getDailyCacheConfigHash, SERVE_HYDRATION_ENV, type DurablePeriod } from './usage-aggregator.js'
+import { aggregateProjectsIntoDays, dateKeyInTz } from './day-aggregator.js'
 import { buildPeriodDiffReport, defaultSevenDayRanges, diffSessions, dayKeyToRange, historyBasis, localRangeInfo } from './period-diff.js'
 import { loadStatusSnapshot, saveStatusSnapshot } from './session-cache.js'
 import { renderDashboard } from './dashboard.js'
 import { renderOverview } from './overview.js'
 import { runWebDashboard } from './web-dashboard.js'
-import { hostname } from 'os'
+import { homedir, hostname } from 'os'
 import { runShareServer } from './sharing/share-run.js'
 import { addRemote, linkRemote, pullDevices, renderDevices, summarizeDeviceUsage } from './sharing/host.js'
 import { browse } from './sharing/discovery.js'
@@ -52,6 +53,7 @@ import {
   runAgyStatusLineHook,
   uninstallAntigravityStatusLineHook,
 } from './antigravity-statusline.js'
+import { getProjectLinksConfigHash, knownOriginKeys, originRepoName, projectLinkFolder, setProjectLinks } from './git-origin.js'
 import { clearPlan, readConfig, readPlan, readPlans, saveConfig, savePlan, getConfigFilePath, setIncludeGatewayInTotals, gatewayIncludedInTotals, type CodeburnConfig, type Plan, type PlanId, type PlanProvider } from './config.js'
 import { clampResetDay, copilotCreditsNote, getPlanUsageOrNull, getPlanUsages, type PlanUsage } from './plan-usage.js'
 import { getPresetPlan, isPlanId, isPlanProvider, PLAN_IDS, PLAN_PROVIDERS, planDisplayName } from './plans.js'
@@ -525,14 +527,24 @@ async function runJsonReport(period: Period, provider: string, project: string[]
 // which promise to stay offline. The keepalive beats through the download for
 // the app watchdogs; it is reference-counted, so the stop never silences a
 // beat serve armed around the whole request.
-async function syncCursor(provider: string): Promise<void> {
-  const { maybeSyncCursor } = await import('./cursor-sync.js')
-  startProgressKeepalive()
-  try {
-    await maybeSyncCursor({ provider })
-  } finally {
-    stopProgressKeepalive()
-  }
+//
+// A JSON or menubar answer never waits on cursor.com: `background` leaves the
+// download running beside the command, and its import shows from the next run
+// on. Dashboards still wait, since they render once and stay open. One sync at
+// a time keeps a serve burst to one download.
+let cursorSync: Promise<void> | null = null
+async function syncCursor(provider: string, background = false): Promise<void> {
+  cursorSync ??= (async () => {
+    const { maybeSyncCursor } = await import('./cursor-sync.js')
+    startProgressKeepalive()
+    try {
+      await maybeSyncCursor({ provider, deferImport: background })
+    } finally {
+      stopProgressKeepalive()
+      cursorSync = null
+    }
+  })()
+  if (!background) await cursorSync
 }
 
 const program = new Command()
@@ -541,8 +553,10 @@ const program = new Command()
   .version(version)
   .option('--verbose', 'print warnings to stderr on read failures and skipped files')
   .option('--timezone <zone>', 'IANA timezone for date grouping (e.g. Asia/Tokyo, America/New_York)')
+  .option('--exact-project', 'A --project/--exclude path matches that folder only, not every checkout of its repository')
 
 program.hook('preAction', async (thisCommand) => {
+  setExactProjectPaths(thisCommand.opts<{ exactProject?: boolean }>().exactProject === true)
   const tz = thisCommand.opts<{ timezone?: string }>().timezone ?? process.env['CODEBURN_TZ']
   if (tz) {
     try {
@@ -560,6 +574,7 @@ program.hook('preAction', async (thisCommand) => {
   setFlatRateModels(config.flatRateModels ?? [])
   setFlatRateRemoved(config.flatRateModelsRemoved ?? [])
   setProxyPaths(config.proxyPaths ?? [])
+  setProjectLinks(config.projectLinks)
   setIncludeGatewayInTotals(config.includeGatewayInTotals === true)
   if (thisCommand.opts<{ verbose?: boolean }>().verbose) {
     process.env['CODEBURN_VERBOSE'] = '1'
@@ -628,17 +643,21 @@ function buildJsonReport(projects: ProjectSummary[], period: string, periodKey: 
       })
 
   const sessionCountBasis = durable.data.sessionCountBasis
-  const projectList = projects.map(p => ({
-    name: p.project,
-    path: p.projectPath,
-    cost: convertCost(p.totalCostUSD),
-    savings: convertCost(p.totalSavingsUSD),
-    ...(sessionCountIsExact(sessionCountBasis) && p.sessions.length > 0
-      ? { avgCostPerSession: convertCost(p.totalCostUSD / p.sessions.length) }
+  // Same durable day set as the headline, so a project's row is what selecting
+  // it reports (expired transcripts included), one row per repository.
+  const projectList = buildPayloadProjects(projects, durable.days, homedir()).map(p => ({
+    name: p.name,
+    path: p.path ?? p.id ?? p.name,
+    cost: convertCost(p.cost),
+    savings: convertCost(p.savingsUSD),
+    ...(sessionCountIsExact(p.sessionCountBasis) && p.sessions > 0
+      ? { avgCostPerSession: convertCost(p.cost / p.sessions) }
       : {}),
-    calls: p.totalApiCalls,
-    sessions: p.sessions.length,
-    ...(sessionCountBasis ? { sessionCountBasis } : {}),
+    calls: p.calls ?? 0,
+    sessions: p.sessions,
+    ...(p.sessionCountBasis ? { sessionCountBasis: p.sessionCountBasis } : {}),
+    ...(p.temporary ? { temporary: true } : {}),
+    ...(p.checkouts ? { checkouts: p.checkouts.map(c => ({ path: c.id, cost: convertCost(c.cost), ...(c.matchedByFolderName ? { matchedByFolderName: true } : {}) })), checkoutCount: p.checkoutCount } : {}),
   }))
 
   const modelMap: Record<string, { calls: number; cost: number; savings: number; estimatedCost: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; baselineModel: string }> = {}
@@ -770,17 +789,17 @@ function buildJsonReport(projects: ProjectSummary[], period: string, periodKey: 
   const sortedMap = (m: Record<string, number>) =>
     Object.entries(m).sort(([, a], [, b]) => b - a).map(([name, calls]) => ({ name, calls }))
 
-  const topSessions = projects
-    .flatMap(p => p.sessions.map(s => ({
-      project: p.project,
-      sessionId: s.sessionId,
-      provider: inferSessionProvider(s),
-      projectKey: s.project || p.project,
-      date: s.firstTimestamp ? dateKey(s.firstTimestamp) : null,
-      cost: convertCost(s.totalCostUSD),
-      savings: convertCost(s.totalSavingsUSD),
-      calls: s.apiCalls,
-    })))
+  const topSessions = foldedSessionRows(mergeProjectSplits(projects))
+    .map(row => ({
+      project: row.summary.project,
+      sessionId: row.sessionId,
+      provider: row.provider,
+      projectKey: row.project,
+      date: row.startedAt ? dateKey(row.startedAt) : null,
+      cost: convertCost(row.cost),
+      savings: convertCost(row.savingsUSD),
+      calls: row.calls,
+    }))
     .sort((a, b) => (b.cost + b.savings) - (a.cost + a.savings))
     .slice(0, 5)
 
@@ -883,7 +902,7 @@ program
     }
 
     const period = toPeriod(opts.period)
-    await syncCursor(opts.provider)
+    await syncCursor(opts.provider, opts.format === 'json')
     if (opts.format === 'json') {
       await loadPricing()
       if (daySelection || customRange) {
@@ -1058,7 +1077,7 @@ program
   .option('--no-color', 'Disable ANSI colors')
   .action(async (opts) => {
     assertProvider(opts.provider, 'overview')
-    await syncCursor(opts.provider)
+    await syncCursor(opts.provider, true)
     await loadPricing()
     let customRange: DateRange | null = null
     try {
@@ -1225,7 +1244,7 @@ program
     const pf = opts.provider
     const fp = (p: ProjectSummary[]) => filterProjectsByName(p, opts.project, opts.exclude)
     if (opts.format === 'menubar-json') {
-      await syncCursor(pf)
+      await syncCursor(pf, true)
       const daysSelection = parseDaysFlag(opts.days)
       const customRange = daysSelection ? null : parseDateRangeFlags(opts.from, opts.to)
       const daySelection = parseDayFlag(opts.day)
@@ -1270,12 +1289,15 @@ program
         ...queryScope,
         days: daysSelection ? [...daysSelection.days].sort() : undefined,
         claudeSourceTopology,
+        // Changes what a --project path selects.
+        exactProject: program.opts<{ exactProject?: boolean }>().exactProject === true,
         // Mirrors parser.ts's cacheKey: pricing-affecting config must
         // invalidate this snapshot the same way it invalidates the
         // parse-level memo, or an edited alias/override/savings config keeps
         // serving costs priced under the old config until something
         // unrelated moves the corpus fingerprint.
         proxyPathsConfigHash: getProxyPathsConfigHash(),
+        projectLinksConfigHash: getProjectLinksConfigHash(),
         modelAliasesConfigHash: getModelAliasesConfigHash(),
         priceOverridesConfigHash: getPriceOverridesConfigHash(),
         localModelSavingsConfigHash: getLocalModelSavingsConfigHash(),
@@ -1393,7 +1415,13 @@ program
       // carry this machine's sync status.
       const { cursorSyncStatus } = await import('./cursor-sync.js')
       const cursorSync = await cursorSyncStatus().catch(() => null)
-      console.log(JSON.stringify(cursorSync ? { ...payload, cursorSync } : payload))
+      const { providerIssues } = await import('./provider-issues.js')
+      const issues = providerIssues()
+      console.log(JSON.stringify({
+        ...payload,
+        ...(cursorSync ? { cursorSync } : {}),
+        ...(issues.length > 0 ? { providerIssues: issues } : {}),
+      }))
       return
     }
 
@@ -1460,7 +1488,7 @@ program
   .action(async (opts) => {
     assertFormat(opts.format, ['tui', 'json'], 'today')
     assertProvider(opts.provider, 'today')
-    await syncCursor(opts.provider)
+    await syncCursor(opts.provider, opts.format === 'json')
     if (opts.format === 'json') {
       await runJsonReport('today', opts.provider, opts.project, opts.exclude)
       return
@@ -1479,7 +1507,7 @@ program
   .action(async (opts) => {
     assertFormat(opts.format, ['tui', 'json'], 'month')
     assertProvider(opts.provider, 'month')
-    await syncCursor(opts.provider)
+    await syncCursor(opts.provider, opts.format === 'json')
     if (opts.format === 'json') {
       await runJsonReport('month', opts.provider, opts.project, opts.exclude)
       return
@@ -1598,6 +1626,26 @@ program
   })
 
 program
+  .command('update')
+  .description('Update the global CLI, the menubar app and the desktop app')
+  .option('--check', 'Report what is out of date; change nothing')
+  .option('--cli', 'The global codeburn command (npm or Homebrew)')
+  .option('--menubar', 'The macOS menubar app, to this CLI\'s version')
+  .option('--desktop', 'The desktop app, by handing off to its own updater')
+  .option('--all', 'Every component (the default)')
+  .option('--local', 'With --check: no network, compare against this CLI\'s version')
+  .option('--json', 'One JSON object per line on stdout')
+  .action(async (opts: Partial<Record<Component | 'all' | 'check' | 'local' | 'json', boolean>>) => {
+    const picked = COMPONENTS.filter(c => opts[c])
+    process.exitCode = await runUpdate({
+      components: opts.all || picked.length === 0 ? COMPONENTS : picked,
+      check: opts.check,
+      local: opts.local,
+      json: opts.json,
+    }, defaultUpdateDeps(version))
+  })
+
+program
   .command('currency [code]')
   .description('Set display currency (e.g. codeburn currency GBP)')
   .option('--symbol <symbol>', 'Override the currency symbol')
@@ -1640,7 +1688,14 @@ program
     await saveConfig(config)
 
     await loadCurrency()
-    const { rate, symbol } = getCurrency()
+    const { code: activeCode, rate, symbol } = getCurrency()
+
+    if (activeCode !== upperCode) {
+      console.log(`\n  Currency set to ${upperCode}, but no exchange rate is available yet (offline?).`)
+      console.log(`  Showing USD until a rate can be fetched.`)
+      console.log(`  Config saved to ${getConfigFilePath()}\n`)
+      return
+    }
 
     console.log(`\n  Currency set to ${upperCode}.`)
     console.log(`  Symbol: ${symbol}`)
@@ -2068,6 +2123,82 @@ program
     await saveConfig(config)
     console.log(`\n  Proxy path saved: ${trimmed}`)
     console.log('  Sessions under it keep their full API-rate cost as the would-be figure; that amount is reported as subscription-covered (net out-of-pocket excludes it).')
+    console.log(`  Config: ${getConfigFilePath()}\n`)
+  })
+
+program
+  .command('project [action] [folder] [project]')
+  .description('Put a folder (and everything under it) in a repository project: project link <folder> <project>, project unlink <folder>, project links. <project> is the name shown in the project list (e.g. codeburn project link ~/crewroom crewroom).')
+  .option('--format <format>', 'Output format: text, json', 'text')
+  .action(async (action?: string, folder?: string, project?: string, opts?: { format?: string }) => {
+    const format = opts?.format ?? 'text'
+    assertFormat(format, ['text', 'json'], 'project')
+    const config = await readConfig()
+    const links = config.projectLinks && typeof config.projectLinks === 'object' ? { ...config.projectLinks } : {}
+    const sameFolder = (a: string, b: string) => normalizeProxyPath(projectLinkFolder(a)) === normalizeProxyPath(projectLinkFolder(b))
+
+    if (!action || action === 'links') {
+      if (format === 'json') {
+        console.log(JSON.stringify(Object.entries(links).map(([f, origin]) => ({ folder: f, project: originRepoName(origin), origin })), null, 2))
+        return
+      }
+      if (Object.keys(links).length === 0) {
+        console.log('\n  No project links.')
+        console.log('  Add one with: codeburn project link <folder> <project>\n')
+        return
+      }
+      console.log('\n  Project links:')
+      for (const [f, origin] of Object.entries(links)) console.log(`    ${f} -> ${originRepoName(origin)} (${origin})`)
+      console.log(`  Config: ${getConfigFilePath()}\n`)
+      return
+    }
+
+    if (action === 'unlink') {
+      const key = folder && Object.keys(links).find(f => sameFolder(f, folder))
+      if (!key) {
+        console.error(`\n  No project link for: ${folder ?? '(no folder given)'}\n`)
+        process.exitCode = 1
+        return
+      }
+      delete links[key]
+      config.projectLinks = Object.keys(links).length ? links : undefined
+      await saveConfig(config)
+      console.log(`\n  Removed project link: ${key}\n`)
+      return
+    }
+
+    if (action !== 'link' || !folder || !project) {
+      console.error('\n  Usage: codeburn project link <folder> <project> | project unlink <folder> | project links\n')
+      process.exitCode = 1
+      return
+    }
+    const target = projectLinkFolder(folder)
+    if (normalizeProxyPath(target) === '') {
+      console.error('\n  The filesystem root is too broad to link.\n')
+      process.exitCode = 1
+      return
+    }
+    // The names the project list shows for repository rows: "repo", or
+    // "org/repo" when two repositories share a name.
+    const wanted = project.trim().toLowerCase()
+    const origins = knownOriginKeys()
+    const matches = origins.filter(o => [o, o.split('/').slice(-2).join('/'), originRepoName(o)].includes(wanted))
+    if (matches.length !== 1) {
+      if (matches.length > 1) {
+        console.error(`\n  Several repositories are named "${project}": ${matches.map(o => o.split('/').slice(-2).join('/')).join(', ')}. Use one of those names.\n`)
+      } else {
+        const close = [...new Set(origins.map(originRepoName))].filter(n => n.includes(wanted) || wanted.includes(n)).sort().slice(0, 5)
+        console.error(`\n  No repository project named "${project}".${close.length ? ` Did you mean: ${close.join(', ')}?` : ''}`)
+        console.error('  A folder can join a project that is a git repository CodeBurn has seen.\n')
+      }
+      process.exitCode = 1
+      return
+    }
+    for (const f of Object.keys(links)) if (sameFolder(f, target)) delete links[f]
+    links[target] = matches[0]!
+    config.projectLinks = links
+    await saveConfig(config)
+    console.log(`\n  Linked ${target} -> ${originRepoName(matches[0]!)} (${matches[0]})`)
     console.log(`  Config: ${getConfigFilePath()}\n`)
   })
 
@@ -2746,6 +2877,7 @@ program
           aggregateProjectsIntoDays,
           getDailyCacheConfigHash(),
           isSessionHydrationComplete,
+          (projects, tz) => aggregateProjectsIntoDays(projects, (iso) => dateKeyInTz(iso, tz)),
         )
         history = historyBasis(
           cache,
@@ -3014,7 +3146,7 @@ program
       process.stderr.write('codeburn: --contributions requires plain --format json (no --by-pr/--by-work-unit)\n')
       process.exit(1)
     }
-    const { aggregateSessions, buildPrAttribution, renderJson, renderTable, renderWorkUnitJson, renderWorkUnitTable } = await import('./sessions-report.js')
+    const { aggregateSessions, buildPrAttribution, foldSubagentRows, renderJson, renderTable, renderWorkUnitJson, renderWorkUnitTable } = await import('./sessions-report.js')
     const wantsInteractive = opts.format === 'table' && !opts.byPr && !opts.byWorkUnit && opts.pager !== false && process.stdin.isTTY === true && process.stdout.isTTY === true
     if (wantsInteractive) setInteractiveScanUI()
     await loadPricing()
@@ -3034,10 +3166,10 @@ program
     const parsed = await parseAllSessions(range, opts.provider)
     await reportUnmatchedProjectPatterns(parsed, opts.project, opts.exclude, () => cachedProjectIdentitiesForRange(range))
     await reportExcludedGatewayCost(range, opts.provider)
-    const projects = filterProjectsByBillingRoute(
+    const projects = mergeProjectSplits(filterProjectsByBillingRoute(
       filterProjectsByName(parsed, opts.project, opts.exclude),
       { route: opts.route, billing: opts.billing },
-    )
+    ))
     if (opts.byPr) {
       const { rows: prRows, totals } = buildPrAttribution(projects)
       if (opts.format === 'json') {
@@ -3057,7 +3189,7 @@ program
           { header: 'PR' },
           { header: 'Cost', right: true },
           { header: 'Saved', right: true },
-          { header: 'Sessions', right: true },
+          { header: 'Runs', right: true },
           { header: 'Calls', right: true },
           { header: 'Models' },
           { header: 'First' },
@@ -3067,7 +3199,7 @@ program
           r.label,
           `${r.approx ? '~' : ''}$${r.cost.toFixed(2)}`,
           `$${r.savingsUSD.toFixed(2)}`,
-          String(r.sessions),
+          String(r.runs),
           String(r.calls),
           modelsCell(r.models),
           r.firstStarted.slice(0, 10),
@@ -3083,23 +3215,24 @@ program
       const subagentNote = subagentSessions > 0
         ? ` + ${subagentSessions} folded-in subagent run${subagentSessions === 1 ? '' : 's'}`
         : ''
-      process.stdout.write(table + `\nRows sum to $${shownAttributed.toFixed(2)} attributed across ${sessions} PR-linked session${sessions === 1 ? '' : 's'}${subagentNote}. $${unattributedCost.toFixed(2)} of that spend was not tied to a specific PR.${approxNote}\n`)
+      const runs = sessions + subagentSessions
+      process.stdout.write(table + `\nRows sum to $${shownAttributed.toFixed(2)} attributed across ${runs} run${runs === 1 ? '' : 's'} (${sessions} PR-linked session${sessions === 1 ? '' : 's'}${subagentNote}). $${unattributedCost.toFixed(2)} of that spend was not tied to a specific PR.${approxNote}\n`)
       return
     }
     const rows = aggregateSessions(projects)
+    const { resolveWorkUnits } = await import('./work-units.js')
+    const { inferSessionProvider } = await import('./session-output.js')
+    const resolution = resolveWorkUnits(projects.flatMap(project => project.sessions.map(session => ({
+      sessionId: session.sessionId,
+      provider: inferSessionProvider(session),
+      lineage: session.lineage,
+    }))))
     if (opts.contributions) {
-      const { withContributions } = await import('./session-contributions.js')
-      process.stdout.write(JSON.stringify(withContributions(rows, projects), null, 2) + '\n')
+      const { foldContributionRows, withContributions } = await import('./session-contributions.js')
+      process.stdout.write(JSON.stringify(foldContributionRows(withContributions(rows, projects), resolution), null, 2) + '\n')
       return
     }
     if (opts.byWorkUnit) {
-      const { resolveWorkUnits } = await import('./work-units.js')
-      const { inferSessionProvider } = await import('./session-output.js')
-      const resolution = resolveWorkUnits(projects.flatMap(project => project.sessions.map(session => ({
-        sessionId: session.sessionId,
-        provider: inferSessionProvider(session),
-        lineage: session.lineage,
-      }))))
       if (opts.format === 'json') {
         process.stdout.write(renderWorkUnitJson(rows, resolution) + '\n')
         return
@@ -3107,17 +3240,18 @@ program
       process.stdout.write(renderWorkUnitTable(rows, resolution) + '\n')
       return
     }
+    const grouped = foldSubagentRows(rows, resolution)
     if (opts.format === 'json') {
-      process.stdout.write(renderJson(rows) + '\n')
+      process.stdout.write(renderJson(grouped) + '\n')
       return
     }
 
     if (wantsInteractive) {
       const { runSessionsTui } = await import('./sessions-tui.js')
-      await runSessionsTui(rows, { period: opts.from || opts.to ? formatDateRangeLabel(opts.from, opts.to) : opts.period, provider: opts.provider })
+      await runSessionsTui(grouped, { period: opts.from || opts.to ? formatDateRangeLabel(opts.from, opts.to) : opts.period, provider: opts.provider })
       return
     }
-    process.stdout.write(renderTable(rows) + '\n')
+    process.stdout.write(renderTable(grouped) + '\n')
   })
 
 program
@@ -3321,5 +3455,12 @@ if (process.argv[2] === 'serve') {
   startProgressKeepalive()
   const program = buildProgram()
   await registerLoadedPluginCommands(program)
+  // A background Cursor sync applies its download once the command is done,
+  // never under the command's own parse.
+  let commandDone = () => {}
+  const done = new Promise<void>(resolve => { commandDone = resolve })
+  program.hook('postAction', () => commandDone())
+  const { setCursorImportRunner } = await import('./cursor-sync.js')
+  setCursorImportRunner(apply => done.then(apply))
   program.parse()
 }

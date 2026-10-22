@@ -184,12 +184,14 @@ const GROK_4_6_HIGH_PROMPT_COSTS = buildCosts(4e-6, 12e-6, null, 1e-6, null)
 // applying the tier there fabricates spend, the exact class #1075 warned
 // about. Adding a provider here requires that kind of billing evidence AND
 // threading its provider through every calculateCost site that prices it (the
-// codex sites and the parser.ts central recompute pass it; the Claude journal
-// paths and the copilot residual path do not, so a newly added provider whose
-// calls flow through those sites would silently stay tierless).
+// codex sites, the Claude journal paths and the parser.ts central recompute
+// pass it; the copilot residual path does not, so a newly added provider whose
+// calls flow through it would silently stay tierless).
 // antigravity has no per-token bill of its own; its cost is the Gemini API
 // equivalent, and the Gemini API bills the above-200k tier per request.
-export const TIERED_PRICING_PROVIDERS: ReadonlySet<string> = new Set(['codex', 'antigravity'])
+// claude: Anthropic's pricing page bills the published long-context tiers per
+// request (Haiku 5.5 over 100k prompt tokens, Sonnet 4.5 over 200k).
+export const TIERED_PRICING_PROVIDERS: ReadonlySet<string> = new Set(['codex', 'antigravity', 'claude'])
 
 // Swap in the vendor's high tier when a request's prompt crosses the published
 // threshold. A user-set priceOverride wins over any tier: the override row
@@ -206,7 +208,7 @@ export function tieredCostsFor(model: string, baseCosts: ModelCosts, promptToken
   const tier = provider !== undefined && TIERED_PRICING_PROVIDERS.has(provider)
     ? baseCosts.longContextTier
     : undefined
-  if (tier && promptTokens >= tier.thresholdTokens) {
+  if (tier && promptTokens > tier.thresholdTokens) {
     return {
       ...baseCosts,
       inputCostPerToken: tier.inputCostPerToken,
@@ -529,6 +531,7 @@ function setPricingCache(pricing: Map<string, ModelCosts>): void {
   sortedPricingKeys = null
   lowercasePricingIndex = null
   knownNamespaces = null
+  shortNameMemo.clear()
 }
 
 export async function loadPricing(): Promise<void> {
@@ -777,6 +780,7 @@ let lowercasePriceOverrideIndex: Map<string, ModelCosts> | null = null
 // User aliases take precedence over built-ins.
 export function setModelAliases(aliases: Record<string, string>): void {
   userAliases = aliases
+  shortNameMemo.clear()
 }
 
 function priceOverrideRatePerToken(usdPerMillion: number | undefined): number | null {
@@ -1540,7 +1544,7 @@ export function calculateCost(
   const safeOneHourCacheCreation = safe(oneHourCacheCreationTokens)
   const safeCacheCreation = Math.max(safe(cacheCreationTokens), safeOneHourCacheCreation)
   const safeFiveMinuteCacheCreation = Math.max(0, safeCacheCreation - safeOneHourCacheCreation)
-  const promptTokens = safe(inputTokens) + safe(cacheReadTokens)
+  const promptTokens = safe(inputTokens) + safe(cacheReadTokens) + safeCacheCreation
   const tieredCosts = tieredCostsFor(model, speed === 'flex' ? costs.flex ?? costs : costs, promptTokens, provider)
   const multiplier = speed === 'fast' ? tieredCosts.fastMultiplier : 1
 
@@ -1619,6 +1623,7 @@ const SHORT_NAMES: Record<string, string> = {
   'gpt-5-nano': 'GPT-5 Nano',
   'gpt-5-mini': 'GPT-5 Mini',
   'gpt-5': 'GPT-5',
+  'gemini-3.8-flash': 'Gemini 3.8 Flash',
   'gemini-3.5-flash': 'Gemini 3.5 Flash',
   'gemini-3.1-pro-preview': 'Gemini 3.1 Pro',
   'gemini-3-flash-preview': 'Gemini 3 Flash',
@@ -1753,15 +1758,27 @@ function lookupShortName(id: string): string | undefined {
 /// so `gpt-5` cannot capture `gpt-5.5` or `gpt-5.6-luna`, exactly as the
 /// global table's `id === key || id.startsWith(key + '-')` cannot (#1530).
 /// Providers match their local tables with this so one model id resolves to
-/// one display name on every provider.
+/// one display name on every provider. A one- or two-digit dash segment is a
+/// minor version (`claude-sonnet-4-6`), not a suffix; dates are longer.
 export function modelKeyMatches(model: string, key: string): boolean {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`(?<![\\w.-])${escaped}(?=$|-)`).test(model)
+  return new RegExp(`(?<![\\w.-])${escaped}(?=$|-(?!\\d{1,2}(?:$|[-.])))`).test(model)
 }
+
+// Reports re-derive the display name of every cached call; the answer depends
+// only on the aliases and the pricing namespaces, which clear it when they change.
+const shortNameMemo = new Map<string, string>()
+const SHORT_NAME_MEMO_MAX = 10_000
 
 // Public API stays unary so Array.map/forEach cannot feed index as cycle state.
 export function getShortModelName(model: string): string {
-  return shortModelName(model, new Set())
+  let name = shortNameMemo.get(model)
+  if (name === undefined) {
+    name = shortModelName(model, new Set())
+    if (shortNameMemo.size >= SHORT_NAME_MEMO_MAX) shortNameMemo.clear()
+    shortNameMemo.set(model, name)
+  }
+  return name
 }
 
 // --- Billing routes ---------------------------------------------------------

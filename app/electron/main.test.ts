@@ -15,7 +15,8 @@ vi.mock('electron', () => ({
   shell: { openExternal: vi.fn() },
 }))
 
-import { createApplicationMenuTemplate, createBeforeQuitHandler, createBridgeHandlers, externalUrlToOpen, readProjectFilter, writeProjectFilter } from './main'
+import { createApplicationMenuTemplate, createBeforeQuitHandler, createBridgeHandlers, createQuitPath, externalUrlToOpen, handOffUpdate, readProjectFilter, writeProjectFilter } from './main'
+import { createAutoUpdateChecker, type Updater } from './auto-update'
 import { CliError } from './cli'
 import { Telemetry } from './telemetry'
 
@@ -67,6 +68,7 @@ const CHANNELS = [
   'codeburn:getProjectFilter',
   'codeburn:setProjectFilter',
   'codeburn:getUnfilteredProjects',
+  'codeburn:setTransientProject',
   'codeburn:getLanguage',
   'codeburn:setLanguage',
   'codeburn:getCursorSync',
@@ -87,6 +89,10 @@ const CHANNELS = [
   'codeburn:telemetryOnboarded',
   'codeburn:telemetryTrack',
   'codeburn:getUpdateStatus',
+  'codeburn:downloadUpdate',
+  'codeburn:installUpdate',
+  'codeburn:companionUpdateStatus',
+  'codeburn:updateCompanions',
   'codeburn:companionStatus',
   'codeburn:companionInstall',
   'codeburn:companionOpen',
@@ -510,6 +516,92 @@ describe('createBeforeQuitHandler', () => {
   })
 })
 
+describe('createQuitPath (quitAndInstall)', () => {
+  function fakeUpdater(onQuitAndInstall: () => void) {
+    const listeners: Record<string, (err: Error) => void> = {}
+    return {
+      autoDownload: true,
+      checkForUpdates: vi.fn(async () => ({ updateInfo: { version: '0.9.27' } })),
+      downloadUpdate: vi.fn(async () => { listeners['update-downloaded']?.(new Error('unused')) }),
+      quitAndInstall: vi.fn(onQuitAndInstall),
+      on: vi.fn((event: 'update-downloaded' | 'error', listener: (err: Error) => void) => { listeners[event] = listener }),
+    } satisfies Updater
+  }
+
+  it('flushes first, bounded, and then lets the quit quitAndInstall starts pass untouched', async () => {
+    vi.useFakeTimers()
+    try {
+      const trackClose = vi.fn()
+      const flush = vi.fn(() => new Promise<boolean>(() => {}))
+      const appQuit = vi.fn()
+      const killAll = vi.fn()
+      const quitPath = createQuitPath({ getTelemetry: () => ({ trackClose, flush }), killAll, quit: appQuit })
+      // Electron: quitAndInstall closes the windows and quits, which emits before-quit.
+      const updateQuit = { preventDefault: vi.fn() }
+      const updater = fakeUpdater(() => quitPath.beforeQuit(updateQuit))
+      const checker = createAutoUpdateChecker({ updater, currentVersion: '0.9.26', onChange: () => {}, beforeQuit: quitPath.beforeInstall })
+
+      await checker.check()
+      await checker.download()
+      expect(trackClose).toHaveBeenCalledOnce()
+      expect(killAll).toHaveBeenCalledOnce()
+
+      await vi.advanceTimersByTimeAsync(1499)
+      expect(updater.quitAndInstall).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(updater.quitAndInstall).toHaveBeenCalledOnce()
+      expect(updateQuit.preventDefault).not.toHaveBeenCalled()
+      expect(appQuit).not.toHaveBeenCalled()
+      expect(trackClose).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a failed install puts the flush back on the next quit', async () => {
+    const appQuit = vi.fn()
+    const killAll = vi.fn()
+    const quitPath = createQuitPath({ getTelemetry: () => null, killAll, quit: appQuit })
+    await quitPath.beforeInstall()
+    const passThrough = { preventDefault: vi.fn() }
+    quitPath.beforeQuit(passThrough)
+    expect(passThrough.preventDefault).not.toHaveBeenCalled()
+
+    quitPath.cancelInstall()
+    const later = { preventDefault: vi.fn() }
+    quitPath.beforeQuit(later)
+    expect(later.preventDefault).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(appQuit).toHaveBeenCalledOnce())
+    expect(killAll).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the bounded flush on an ordinary quit', async () => {
+    const appQuit = vi.fn()
+    const quitPath = createQuitPath({ getTelemetry: () => null, killAll: vi.fn(), quit: appQuit })
+    const event = { preventDefault: vi.fn() }
+    quitPath.beforeQuit(event)
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(appQuit).toHaveBeenCalledOnce())
+  })
+})
+
+describe('handOffUpdate (--codeburn-update)', () => {
+  it('checks, pushes the status, then downloads; without a checker it does nothing', async () => {
+    const order: string[] = []
+    const status = { currentVersion: '0.9.26', latestVersion: '0.9.27', updateAvailable: true, tag: 'desktop-v0.9.27', install: 'available' as const }
+    const checker = {
+      check: vi.fn(async () => { order.push('check'); return status }),
+      download: vi.fn(async () => { order.push('download'); return status }),
+    }
+    const onStatus = vi.fn(() => { order.push('status') })
+    await handOffUpdate(checker, onStatus)
+    expect(order).toEqual(['check', 'status', 'download'])
+    expect(onStatus).toHaveBeenCalledWith(status)
+
+    await expect(handOffUpdate(null, onStatus)).resolves.toBeUndefined()
+  })
+})
+
 describe('createBridgeHandlers (cold-start warmup)', () => {
   const base = (extra: object) => ({ spawnCli: vi.fn(), spawnCliAction: vi.fn(), resolveCodeburnPath: () => '/bin/codeburn', getQuota: vi.fn(async () => []), ...extra })
 
@@ -776,7 +868,7 @@ describe('createBridgeHandlers (telemetry wiring)', () => {
     }
     const handlers = createBridgeHandlers(failing)
     await handlers['codeburn:getSessions']!('week', 'all')
-    expect(telemetry.track).toHaveBeenCalledWith('cli_error', { cmd: 'sessions', kind: 'timeout' })
+    expect(telemetry.track).toHaveBeenCalledWith('cli_error', { cmd: 'sessions', kind: 'timeout', ms: '<1s' })
   })
 
   it('includes the resolution-stage detail for a not-found (self-diagnosing without a repro)', async () => {
@@ -788,7 +880,7 @@ describe('createBridgeHandlers (telemetry wiring)', () => {
     }
     const handlers = createBridgeHandlers(failing)
     await handlers['codeburn:getPlans']!('week')
-    expect(telemetry.track).toHaveBeenCalledWith('cli_error', { cmd: 'status', kind: 'not-found', detail: 'bundled-not-absolute' })
+    expect(telemetry.track).toHaveBeenCalledWith('cli_error', { cmd: 'status', kind: 'not-found', detail: 'bundled-not-absolute', ms: '<1s' })
   })
 
   it('never leaks a path or message into cli_error telemetry, even when the error carries one', async () => {
@@ -803,9 +895,50 @@ describe('createBridgeHandlers (telemetry wiring)', () => {
     const handlers = createBridgeHandlers(failing)
     await handlers['codeburn:getSessions']!('week', 'all')
     const props = telemetry.track.mock.calls.find(([name]) => name === 'cli_error')![1] as Record<string, unknown>
-    expect(props).toEqual({ cmd: 'sessions', kind: 'not-found', detail: 'spawn-error' })
+    expect(props).toEqual({ cmd: 'sessions', kind: 'not-found', detail: 'spawn-error', ms: '<1s' })
     expect(JSON.stringify(props)).not.toContain('secret')
     expect(JSON.stringify(props)).not.toContain('C:\\')
+  })
+
+  it('adds the exit code, a stderr reason label and a scoped provider, never the stderr or a project', async () => {
+    const telemetry = fakeTelemetry()
+    const handlers = createBridgeHandlers({
+      ...deps(telemetry),
+      spawnCli: vi.fn(async () => {
+        throw new CliError('nonzero', "EACCES: permission denied, open '/Users/alice/secret/a.jsonl'", undefined, '1')
+      }),
+    })
+    await handlers['codeburn:getSessions']!('week', 'codex')
+    await handlers['codeburn:getOverview']!('week', 'all')
+    const calls = telemetry.track.mock.calls.filter(([name]) => name === 'cli_error').map(([, props]) => props)
+    expect(calls).toEqual([
+      { cmd: 'sessions', kind: 'nonzero', ms: '<1s', exit: '1', reason: 'eacces', provider: 'codex' },
+      { cmd: 'status', kind: 'nonzero', ms: '<1s', exit: '1', reason: 'eacces' },
+    ])
+    expect(JSON.stringify(calls)).not.toContain('secret')
+  })
+
+  it('forwards valid providerIssues from the overview payload as provider_read_fail', async () => {
+    const telemetry = fakeTelemetry()
+    const handlers = createBridgeHandlers({
+      ...deps(telemetry),
+      spawnCli: vi.fn(async () => ({
+        current: { cost: 1 },
+        providerIssues: [
+          { provider: 'cursor', stage: 'locate', kind: 'eacces' },
+          { provider: 'codex', stage: 'parse', kind: 'malformed' },
+          { provider: '/Users/alice', stage: 'parse', kind: 'error' },
+          { provider: 'kiro', stage: 'empty', kind: 'error' },
+          { provider: 'zed', stage: 'parse', kind: 'EACCES: /Users/alice' },
+        ],
+      })),
+    })
+    await handlers['codeburn:getOverview']!('week', 'all')
+    const forwarded = telemetry.track.mock.calls.filter(([name]) => name === 'provider_read_fail').map(([, props]) => props)
+    expect(forwarded).toEqual([
+      { provider: 'cursor', stage: 'locate', kind: 'eacces' },
+      { provider: 'codex', stage: 'parse', kind: 'malformed' },
+    ])
   })
 })
 
@@ -931,6 +1064,51 @@ describe('project filter', () => {
       await handlers['codeburn:getOverview']!('30days', 'all', undefined, undefined, undefined, 'combined')
       expect(calls[0]).toEqual(['status', '--format', 'menubar-json', '--period', '30days', '--no-timeline', '--no-optimize', '--scope', 'combined'])
     })
+  })
+
+  it('narrows every report to the top bar project without touching the saved filter', async () => {
+    await withFilterFile(async () => {
+      writeProjectFilter({ project: ['work'], exclude: ['scratch'] })
+      const { spawnCli, spawnCliAction, calls } = fakeSpawn()
+      const handlers = createBridgeHandlers(deps({ spawnCli, spawnCliAction, resolveCodeburnPath: () => '/bin/codeburn' }))
+      expect(await handlers['codeburn:setTransientProject']!('/Users/me/work/-app')).toEqual({ ok: true, value: undefined })
+      await handlers['codeburn:getSessions']!('week', 'all')
+      // The pick replaces the saved includes; the saved excludes still apply.
+      expect(calls[0]).toEqual(['sessions', '--format', 'json', '--period', 'week', '--project==/Users/me/work/-app', '--exclude=scratch'])
+      // A project pick is local data: combined is dropped like with any filter.
+      await handlers['codeburn:getOverview']!('30days', 'all', undefined, undefined, undefined, 'combined')
+      expect(calls[1]).toEqual(['status', '--format', 'menubar-json', '--period', '30days', '--no-timeline', '--no-optimize', '--project==/Users/me/work/-app', '--exclude=scratch'])
+      // Not project-scoped: plans, the Projects pane list, and exports.
+      await handlers['codeburn:getPlans']!('week')
+      expect(calls[2]).toEqual(['status', '--format', 'json', '--period', 'week'])
+      await handlers['codeburn:getUnfilteredProjects']!()
+      expect(calls[3]).toEqual(['report', '--format', 'json', '--period', 'lifetime'])
+      await handlers['codeburn:exportData']!('json', 'all', '/tmp/out')
+      expect(calls[4]).toEqual(['export', '-f', 'json', '-o', '/tmp/out', '--provider', 'all', '--project=work', '--exclude=scratch'])
+      expect(readProjectFilter()).toEqual({ project: ['work'], exclude: ['scratch'] })
+
+      await handlers['codeburn:setTransientProject']!(null)
+      await handlers['codeburn:getSessions']!('week', 'all')
+      expect(calls[5]).toEqual(['sessions', '--format', 'json', '--period', 'week', '--project=work', '--exclude=scratch'])
+    })
+  })
+
+  it('accepts the temporary-folders row for the top bar pick', async () => {
+    const { spawnCli, spawnCliAction, calls } = fakeSpawn()
+    const handlers = createBridgeHandlers(deps({ spawnCli, spawnCliAction, resolveCodeburnPath: () => '/bin/codeburn' }))
+    expect(await handlers['codeburn:setTransientProject']!('@temp')).toEqual({ ok: true, value: undefined })
+    await handlers['codeburn:getSessions']!('week', 'all')
+    expect(calls[0]).toEqual(['sessions', '--format', 'json', '--period', 'week', '--project==@temp'])
+  })
+
+  it('accepts only an absolute project path for the top bar pick', async () => {
+    const { spawnCli, spawnCliAction, calls } = fakeSpawn()
+    const handlers = createBridgeHandlers(deps({ spawnCli, spawnCliAction, resolveCodeburnPath: () => '/bin/codeburn' }))
+    for (const bad of ['app', '', '--all', '/a\0b', 42, undefined]) {
+      expect(await handlers['codeburn:setTransientProject']!(bad)).toMatchObject({ ok: false, error: { kind: 'bad-args' } })
+    }
+    await handlers['codeburn:getSessions']!('week', 'all')
+    expect(calls[0]).toEqual(['sessions', '--format', 'json', '--period', 'week'])
   })
 
   it('drops blanks and duplicates on write, but keeps encoded names starting with "-"', async () => {

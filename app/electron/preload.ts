@@ -69,6 +69,7 @@ const bridge = {
   getProjectFilter: () => invoke('codeburn:getProjectFilter'),
   setProjectFilter: (filter: { project: string[]; exclude: string[] }) => invoke('codeburn:setProjectFilter', filter),
   getUnfilteredProjects: () => invoke('codeburn:getUnfilteredProjects'),
+  setTransientProject: (projectPath: string | null) => invoke('codeburn:setTransientProject', projectPath),
   setPriceOverride: (model: string, rates: PriceRates) => invoke('codeburn:setPriceOverride', model, rates),
   removePriceOverride: (model: string) => invoke('codeburn:removePriceOverride', model),
   setCurrency: (code: string) => invoke('codeburn:setCurrency', code),
@@ -99,6 +100,16 @@ const bridge = {
     ipcRenderer.on('codeburn:update', listener)
     return () => { ipcRenderer.removeListener('codeburn:update', listener) }
   },
+  downloadUpdate: () => invoke('codeburn:downloadUpdate'),
+  installUpdate: () => invoke('codeburn:installUpdate'),
+  // The menubar app and global CLI following the desktop's version: a read, a push, and a run.
+  getCompanionUpdate: () => invoke('codeburn:companionUpdateStatus'),
+  onCompanionUpdate: (cb: (status: unknown) => void) => {
+    const listener = (_e: unknown, status: unknown) => cb(status)
+    ipcRenderer.on('codeburn:companionUpdate', listener)
+    return () => { ipcRenderer.removeListener('codeburn:companionUpdate', listener) }
+  },
+  updateCompanions: () => invoke('codeburn:updateCompanions'),
   // The bundled tray app and its Capacity Dock (Windows). Every setter answers with the
   // whole status, so the sidebar renders what took rather than what it asked for.
   companionStatus: () => invoke('codeburn:companionStatus'),

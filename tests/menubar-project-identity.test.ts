@@ -3,9 +3,10 @@ import { mkdtemp } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { getDateRange } from '../src/cli-date.js'
+import { __setTempRoots } from '../src/git-origin.js'
 import { currentTzKey, DAILY_CACHE_VERSION, toDateString, type DailyCache, type DailyEntry } from '../src/daily-cache.js'
 import { calculateCost, loadPricing } from '../src/models.js'
 import { computeSpendFlow } from '../src/spend-flow.js'
@@ -13,6 +14,10 @@ import type { ProjectSummary, SessionSummary } from '../src/types.js'
 import { buildMenubarPayloadForRange, buildPayloadProjects, getDailyCacheConfigHash } from '../src/usage-aggregator.js'
 
 vi.setConfig({ testTimeout: 30_000 })
+
+// The fixtures use /tmp as an ordinary parent folder, not as agent scratch space.
+beforeAll(() => __setTempRoots([]))
+afterAll(() => __setTempRoots(null))
 
 const emptyTokens = {
   inputTokens: 0,
@@ -212,7 +217,7 @@ describe('buildPayloadProjects identity', () => {
     expect(rows.filter(r => r.id === '/a/vault' || r.id === '/b/vault').every(r => r.cost === 0)).toBe(true)
   })
 
-  it('conserves live-only provider cost when coalescing a cached provider at the same cwd', () => {
+  it('conserves a second provider at the same cwd when coalescing', () => {
     const shared = '/tmp/shared-vault'
     const rows = buildPayloadProjects(
       [
@@ -225,6 +230,7 @@ describe('buildPayloadProjects identity', () => {
       ],
       [cacheDay({
         'shared-vault': { cost: 0.45, calls: 1, savingsUSD: 0, sessions: 1, path: shared },
+        '-tmp-shared-vault': { cost: 0.00091, calls: 1, savingsUSD: 0, sessions: 1, path: shared },
       })],
       home,
     )
@@ -254,19 +260,19 @@ describe('buildPayloadProjects identity', () => {
   })
 
   // Root fixture root-project-mixed-valid-repro.ts — adapt only the import.
-  it('Other provider cache must not suppress live-only provider cost', () => {
+  it('Other provider cache must not suppress the second provider at the same cwd', () => {
     const sess = (id: string, cost: number): any => ({ sessionId: id, project: id, firstTimestamp: '2026-09-07T12:00:00Z', totalCostUSD: cost, totalSavingsUSD: 0, apiCalls: 1, totalInputTokens: 100, totalOutputTokens: 20, totalReasoningTokens: 0, modelBreakdown: {}, turns: [] })
     const liveRow = (project: string, cost: number): any => ({ project, projectPath: '/tmp/shared-vault', sessions: [sess(project, cost)], totalCostUSD: cost, totalSavingsUSD: 0, totalApiCalls: 1 })
-    const rows = buildPayloadProjects([liveRow('claude-slug', 2), liveRow('codex-slug', 3)], [{ projects: { 'claude-slug': { path: '/tmp/shared-vault', cost: 2, savingsUSD: 0, sessions: 1 } } }] as any, '/Users/synthetic')
+    const rows = buildPayloadProjects([liveRow('claude-slug', 2), liveRow('codex-slug', 3)], [{ projects: { 'claude-slug': { path: '/tmp/shared-vault', cost: 2, savingsUSD: 0, sessions: 1 }, 'codex-slug': { path: '/tmp/shared-vault', cost: 3, savingsUSD: 0, sessions: 1 } } }] as any, '/Users/synthetic')
     expect(rows.length).toBe(1)
     expect(rows[0]!.cost).toBe(5)
   })
 
   // Root fixture root-project-detail-ownership-repro.ts — adapt only the import.
-  it('Unallocated legacy details must exclude live-only sibling', () => {
+  it('Unallocated legacy details must exclude a sibling slug', () => {
     const sess = (id: string, cost: number): any => ({ sessionId: id, project: id, firstTimestamp: '2026-09-07T12:00:00Z', totalCostUSD: cost, totalSavingsUSD: 0, apiCalls: 1, totalInputTokens: 100, totalOutputTokens: 20, totalReasoningTokens: 0, modelBreakdown: {}, turns: [] })
     const liveRow = (path: string, sessions: any[]): any => ({ project: 'vault', projectPath: path, sessions, totalCostUSD: sessions.reduce((n: number, s: any) => n + s.totalCostUSD, 0), totalSavingsUSD: 0, totalApiCalls: sessions.length })
-    const rows = buildPayloadProjects([liveRow('/a/vault', [sess('vault', 2), sess('codex-other', 7)]), liveRow('/b/vault', [sess('vault', 3)])], [{ projects: { vault: { cost: 5, savingsUSD: 0, sessions: 2 } } }] as any, '/Users/synthetic')
+    const rows = buildPayloadProjects([liveRow('/a/vault', [sess('vault', 2), sess('codex-other', 7)]), liveRow('/b/vault', [sess('vault', 3)])], [{ projects: { vault: { cost: 5, savingsUSD: 0, sessions: 2 }, 'codex-other': { path: '/a/vault', cost: 7, savingsUSD: 0, sessions: 1 } } }] as any, '/Users/synthetic')
     expect(rows.reduce((n, r) => n + r.cost, 0)).toBe(12)
     const legacy = rows.find(r => r.id === 'vault')!
     const other = rows.find(r => r.id === '/a/vault')!
@@ -286,6 +292,7 @@ describe('buildPayloadProjects identity', () => {
       ],
       [cacheDay({
         'shared-vault': { cost: 0.45, calls: 1, savingsUSD: 0, sessions: 1, path: shared },
+        '-tmp-shared-vault': { cost: 0.00091, calls: 1, savingsUSD: 0, sessions: 1, path: shared },
       })],
       home,
     )

@@ -129,6 +129,9 @@ export type ParsedApiCall = {
   /// this call's assistant message. Transient (built at parse time, aggregated
   /// into the turn's `spawnToolUseIds`); never cached per-call.
   spawnToolUseIds?: string[]
+  /// Claude Code: the `cwd` recorded on this call's assistant line. Transient
+  /// (parse time only); the cache stores it per call only when it changes.
+  cwd?: string
   /// When set, `costUSD` is the actual local call (forced to 0) and
   /// `savingsUSD` is the counterfactual cost the same tokens would have
   /// incurred against `savingsBaselineModel`. Set by the savings
@@ -209,6 +212,10 @@ export type ClassifiedTurn = ParsedTurn & {
   subCategory?: string
   retries: number
   hasEdits: boolean
+  /// The calls of a turn that moved to another project mid-turn. The piece that
+  /// holds the turn's first call carries the turn's weight; this one only cost
+  /// (it reads as no edits and no retries).
+  projectContinuation?: boolean
 }
 
 export type SessionSourceMetadata = {
@@ -267,6 +274,10 @@ export type SessionSummary = {
   // (`workflow-subagent`, `Explore`, `general-purpose`, …); undefined for
   // ordinary sessions. Drives the Claude-scoped agent-type breakdown.
   agentType?: string
+  /// Claude Code only: a subagent's `.meta.json` sidecar. Its Agent
+  /// `description` ("Review PR 1729 Claude quota dir") is read only by PR
+  /// attribution, on demand.
+  agentMetaPath?: string
   /// OMP nested-agent file stem. Kept separate from Claude's agentType metadata.
   agentName?: string
   /// OMP nested-agent session-header timestamp.
@@ -323,8 +334,8 @@ export type SessionSummary = {
   /// reference made before the window into its later, in-range, ref-less turns.
   /// Absent when no PR was referenced before the range (or no range filter).
   prRefsAtRangeStart?: string[]
-  /// Human session title captured from the transcript (last ai-title entry).
-  /// Absent when the transcript never produced one.
+  /// Human title from the transcript or the optional Codex session index.
+  /// Codex names are refreshed at report time, independently of usage caches.
   title?: string
   /// True when the session observed a git branch on ANY turn of its FULL
   /// (pre-date-filter) transcript. Set before turns are sliced to a range so the
@@ -333,6 +344,10 @@ export type SessionSummary = {
   /// from a provider that never captures branches (→ contributes nothing).
   /// Claude only; absent otherwise.
   everHadBranch?: boolean
+  /// Claude Code: set on each per-project slice of a session whose calls ran
+  /// in more than one project (per-call `cwd`). Session rows merge the slices
+  /// back into one row labeled with the primary (highest-cost) project.
+  projectSplit?: { primaryProject: string; primaryProjectPath: string; primary: boolean }
   modelBreakdown: Record<string, { calls: number; costUSD: number; tokens: TokenUsage; savingsUSD: number; estimatedCostUSD?: number; activeDurationMs?: number; activeGeneratedTokens?: number; toolWaitMs?: number }>
   toolBreakdown: Record<string, { calls: number }>
   mcpBreakdown: Record<string, { calls: number }>

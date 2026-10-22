@@ -11,6 +11,7 @@ import type { ParseReuseValidation } from './parser.js'
 import { SERVE_HYDRATION_ENV } from './usage-aggregator.js'
 import { suppressProjectFilterWarnings } from './project-filter-warnings.js'
 import { isPathBlocked } from './sqlite.js'
+import { codexSessionIndexFingerprint } from './codex-session-index.js'
 
 // ---------------------------------------------------------------------------
 // codeburn serve --stdio: a resident query server for the desktop app.
@@ -435,13 +436,15 @@ async function runCaptured(
 /// memo hot, while any real change invalidates immediately. A missing config
 /// is a stable state; every other read failure fails closed (no memo reuse).
 async function getConfigFingerprint(): Promise<string | null> {
+  const names = await codexSessionIndexFingerprint()
+  if (names === null) return null
   const path = getConfigFilePath()
   try {
     const content = await readFile(path)
     const digest = createHash('sha256').update(content).digest('hex')
-    return `${path}\u0000sha256:${digest}`
+    return `${path}\u0000sha256:${digest}\u0000codex-names:${names}`
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return `${path}\u0000missing`
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return `${path}\u0000missing\u0000codex-names:${names}`
     return null
   }
 }
@@ -730,6 +733,22 @@ export async function runStdioServe(buildProgram: () => Command): Promise<void> 
 
   // Strict serialization: each request chains on the previous one.
   let queue: Promise<void> = Promise.resolve()
+
+  // A Cursor sync a request left running applies its download between two
+  // requests, and nothing derived before it is served again. The import store
+  // sits under no watched root, so the watchers would not notice it.
+  const { setCursorImportRunner } = await import('./cursor-sync.js')
+  const { clearSessionCache } = await import('./parser.js')
+  setCursorImportRunner(apply => {
+    const applied = queue.then(async () => {
+      const result = await apply()
+      outputMemo.clear()
+      clearSessionCache()
+      return result
+    })
+    queue = applied.then(() => undefined, () => undefined)
+    return applied
+  })
 
   // Progressive cold start (#1110). Ids of requests received but not yet
   // answered, so work that holds the queue can heartbeat them.

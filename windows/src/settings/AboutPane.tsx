@@ -4,16 +4,18 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 
 import { Group, Note, Pane, Row } from './controls'
 import { ArrowUpRight, FLAME_PATH } from '../components/Icons'
+import { describeCliUpdate } from '../lib/cliUpdate'
 import { relativePast } from '../lib/dates'
+import { t, useI18nRevision } from '../lib/i18n'
 import {
-  EMPTY_UPDATE, checkUpdates, openReleasePage, subscribeUpdate, type UpdateState,
+  EMPTY_UPDATE, badgeAction, checkUpdates, runUpdateAction, subscribeUpdate, updateCli, type UpdateState,
 } from '../lib/update'
 import { track } from '../lib/telemetry'
 
 /// The mac's AboutSettingsTab: a brand hero, the version with a Check for Updates button,
-/// the three links, and the licence line. What the check finds is not installed from here:
-/// outside the Microsoft Store the build is unsigned, so the reader is sent to the release
-/// page and given the command that installs it. See src-tauri/src/update.rs.
+/// the three links, and the licence line. A signed build installs what the check finds in one
+/// click; otherwise the reader is sent to the release page and given the command that installs
+/// it. See src-tauri/src/update.rs.
 
 const LINKS = [
   { title: 'GitHub', url: 'https://github.com/getagentseal/codeburn' },
@@ -35,6 +37,7 @@ export function AboutPane({ anchor }: Props) {
     invoke<string>('app_version').then(setVersion).catch(() => {})
   }, [])
   useEffect(() => subscribeUpdate(setUpdate), [])
+  useI18nRevision()
   useEffect(() => {
     if (anchor === 'check') void checkUpdates(true)
   }, [anchor])
@@ -42,7 +45,11 @@ export function AboutPane({ anchor }: Props) {
   const status = update.status
   const storeManaged = status?.storeManaged ?? false
   const appUpdate = (status?.updateAvailable ?? false) && !storeManaged
-  const cliUpdate = (status?.cliUpdateAvailable ?? false) && !storeManaged
+  const cliUpdate = status?.cliUpdateAvailable ?? false
+  const oneClick = status?.installRoute === 'oneClick'
+  const action = badgeAction(update)
+  const cliNote = describeCliUpdate(update.cliUpdate, t, status?.cliUpdateCommand ?? '')
+  const busy = update.downloading || update.cliUpdate.running
 
   return (
     <Pane>
@@ -74,9 +81,13 @@ export function AboutPane({ anchor }: Props) {
                 <button
                   type="button"
                   className="btn btn-prominent"
-                  onClick={() => { track('update_click', { action: 'download' }); void openReleasePage(status) }}
+                  disabled={busy}
+                  onClick={() => { track('update_click', { action }); runUpdateAction(action, status) }}
                 >
-                  Download from GitHub
+                  {!oneClick ? 'Download from GitHub'
+                    : status?.readyToInstall ? 'Restart to Update'
+                    : update.cliUpdate.running ? t('Updating the CLI...')
+                    : update.downloading ? 'Downloading...' : 'Update'}
                 </button>
               )}
               <button
@@ -90,16 +101,32 @@ export function AboutPane({ anchor }: Props) {
             </>
           )}
         />
-        {appUpdate && status && (
+        {appUpdate && !oneClick && status && (
           <CommandRow
             label="Or install it from a terminal"
             hint="Downloads the same release, checks it and runs the installer."
             command={status.appUpdateCommand}
           />
         )}
-        {cliUpdate && status && (
-          <CommandRow label="Update the CLI" command={status.cliUpdateCommand} />
+        {cliUpdate && status && !(appUpdate && oneClick) && (
+          <Row
+            label={t('Update CLI')}
+            control={(
+              <button
+                type="button"
+                className="btn"
+                disabled={busy}
+                onClick={() => { track('update_click', { action: 'cli' }); void updateCli() }}
+              >
+                {t('Update CLI')}
+              </button>
+            )}
+          />
         )}
+        {cliNote?.command && (
+          <CommandRow label="Run it from a terminal" command={cliNote.command} />
+        )}
+        {cliNote && <Note>{cliNote.text}</Note>}
         <Note>{resultNote(update)}</Note>
       </Group>
 
@@ -164,9 +191,12 @@ function resultNote(update: UpdateState): string {
   const status = update.status
   if (!status) return update.checking ? 'Checking GitHub for a newer release...' : ''
   if (status.storeManaged) {
-    return 'This copy came from the Microsoft Store, which keeps it up to date. There is nothing to check here.'
+    const store = 'This copy came from the Microsoft Store, which keeps it up to date.'
+    return status.cliUpdateAvailable && status.latestCliVersion
+      ? `${store} CLI ${status.latestCliVersion} is available (you have ${status.installedCliVersion ?? 'none'}).`
+      : `${store} There is nothing to check here.`
   }
-  if (status.error) return `Check failed. ${status.error}`
+  if (status.error) return `${status.failureStage === 'install' ? 'Update failed.' : 'Check failed.'} ${status.error}`
   const parts: string[] = []
   if (status.updateAvailable && status.latestVersion) {
     parts.push(`Version ${status.latestVersion} is available.`)
@@ -177,7 +207,7 @@ function resultNote(update: UpdateState): string {
   if (parts.length === 0) {
     return `You are on the latest version (${status.currentVersion}).`
   }
-  if (status.updateAvailable) {
+  if (status.updateAvailable && status.installRoute !== 'oneClick') {
     parts.push(
       'These builds are unsigned and do not update themselves, so CodeBurn will not install one for you. Download it from GitHub and Windows will vet it before it runs.',
     )

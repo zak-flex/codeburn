@@ -159,7 +159,7 @@
 "Update Check Failed" = "Échec de la vérification des mises à jour";
 "CLI Update Failed" = "Échec de la mise à jour de la CLI";
 "Menubar Update Failed" = "Échec de la mise à jour de l'app menu bar";
-"CodeBurn could not check GitHub for updates." = "CodeBurn n'a pas pu vérifier les mises à jour sur GitHub.";
+"CodeBurn could not check for updates." = "CodeBurn n'a pas pu vérifier les mises à jour.";
 "CodeBurn could not update the CLI." = "CodeBurn n'a pas pu mettre à jour la CLI.";
 "CodeBurn could not update the menubar app." = "CodeBurn n'a pas pu mettre à jour l'app menu bar.";
 "Click to retry the update check." = "Cliquez pour relancer la vérification des mises à jour.";
@@ -167,12 +167,20 @@
 "Updating..." = "Mise à jour…";
 "Update" = "Mettre à jour";
 "Update the CLI and menubar to the latest release" = "Mettre la CLI et l'app menu bar à jour vers la dernière version";
+"Desktop Update Failed" = "Échec de la mise à jour de l’app de bureau";
+"CodeBurn could not update the desktop app." = "CodeBurn n'a pas pu mettre à jour l’app de bureau.";
+"Updating CLI..." = "Mise à jour de la CLI…";
+"Updating menubar..." = "Mise à jour de l'app menu bar…";
+"Opening CodeBurn to update..." = "Ouverture de CodeBurn pour la mise à jour…";
+"Update the CLI, menubar and desktop app to the latest release" = "Mettre la CLI, l'app menu bar et l’app de bureau à jour vers la dernière version";
 "CodeBurn %@ available" = "CodeBurn %@ disponible";
 "App and CLI %@ updates are ready. Click to install." = "Les mises à jour %@ de l'app et de la CLI sont prêtes. Cliquez pour installer.";
 "Click to install the update." = "Cliquez pour installer la mise à jour.";
 "CodeBurn CLI %@ available" = "CodeBurn CLI %@ disponible";
 "Could not find the package manager for %1$@. Run “%2$@” manually, then try again." = "Gestionnaire de paquets introuvable pour %1$@. Exécutez « %2$@ » manuellement, puis réessayez.";
 "the CLI" = "la CLI";
+"This codeburn CLI comes with the CodeBurn desktop app. Update the desktop app, then try again." = "Cette CLI codeburn est fournie avec l’app de bureau CodeBurn. Mettez à jour l’app de bureau, puis réessayez.";
+"npm does not have permission to update the global codeburn install. Run “%@” in Terminal, then try again." = "npm n’a pas l’autorisation de mettre à jour l’installation globale de codeburn. Exécutez « %@ » dans le Terminal, puis réessayez.";
 "CLI update failed (exit %lld)" = "Échec de la mise à jour de la CLI (code %lld)";
 "Your codeburn CLI (%1$@) is too old to update the menubar. Run “%2$@” first, then try again." = "Votre CLI codeburn (%1$@) est trop ancienne pour mettre à jour l'app menu bar. Exécutez d'abord « %2$@ », puis réessayez.";
 "Update failed (exit %lld)" = "Échec de la mise à jour (code %lld)";
@@ -215,9 +223,6 @@
 "%1$@ over limit (%2$lld%%)" = "%1$@ au-delà de la limite (%2$lld%%)";
 "resets in %@" = "réinitialisation dans %@";
 "Change accent color" = "Changer la couleur d'accent";
-"CLI %@ available" = "CLI %@ disponible";
-"Update now" = "Mettre à jour";
-"Update the CLI (and the menubar if one is available) automatically" = "Mettre à jour automatiquement la CLI (et l'app menu bar si disponible)";
 "Copy update command to clipboard" = "Copier la commande de mise à jour";
 "Enjoying CodeBurn?" = "Vous aimez CodeBurn ?";
 "Star us on GitHub" = "Mettez-nous une étoile sur GitHub";
@@ -609,6 +614,7 @@
 "This credential predates a live CodeBurn quota adapter and is not treated as a connection." = "Cet identifiant précède un adaptateur de quota CodeBurn en direct et n'est pas considéré comme une connexion.";
 "Quota adapter not available" = "Adaptateur de quota indisponible";
 "Retrying" = "Nouvel essai";
+"Cline login expired" = "Connexion Cline expirée";
 "%@ is catalogued, but CodeBurn cannot fetch its live quota yet." = "%@ est répertorié, mais CodeBurn ne peut pas encore récupérer son quota en direct.";
 "Live quota is available to Capacity Dock." = "Le quota en direct est disponible pour le Capacity Dock.";
 "Waiting for quota data." = "En attente des données de quota.";

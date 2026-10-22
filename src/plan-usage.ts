@@ -117,7 +117,17 @@ export function copilotCreditSpend(projects: ProjectSummary[]): CopilotCreditSpe
   // supplementary twin across a local-day boundary, so both nanoAiu rows can
   // occupy separate turns of the same session. Close the twin once here.
   forEachPlanSession(projects, calls => {
-    const copilot = calls.filter(call => call.provider === 'copilot')
+    // A VS Code chat-session request's copilotCredits bills that request
+    // alone, so a session that spans the Copilot Chat 0.69 upgrade keeps an
+    // estimate for its older requests. Agent-host figures bill the session.
+    const isChatRequest = (call: ParsedApiCall) => call.deduplicationKey.startsWith('copilot-chatsession:')
+    const chatRated = calls.filter(call => call.provider === 'copilot' && isChatRequest(call) && isFiniteNanoAiu(call.nanoAiu))
+    const chatUnrated = calls.filter(call => call.provider === 'copilot' && isChatRequest(call) && !isFiniteNanoAiu(call.nanoAiu))
+    for (const call of chatRated) nanoSum += call.nanoAiu!
+    for (const call of chatUnrated) estimatedUsd += call.costUSD
+    ratedCalls += behavioralCallCount(chatRated)
+    unratedCalls += behavioralCallCount(chatUnrated)
+    const copilot = calls.filter(call => call.provider === 'copilot' && !isChatRequest(call))
     if (copilot.length === 0) return
     const primaryNano = copilot.filter(call => !call.supplementaryAccounting && isFiniteNanoAiu(call.nanoAiu))
     const suppNano = copilot.filter(call => call.supplementaryAccounting && isFiniteNanoAiu(call.nanoAiu))
@@ -161,7 +171,7 @@ export function copilotCreditsNote(rated: number, unrated: number): string {
   if (unrated === 0) {
     return `All ${rated} Copilot requests in this period carry GitHub's exact credit figure, so spentCredits is complete.`
   }
-  return `${rated} of ${rated + unrated} Copilot requests carry GitHub's exact credit figure (only Copilot CLI and VS Code agent-host sessions record it). spentCredits counts only those; estimatedCredits adds the rest priced from tokens at listed API rates, which matched GitHub within about 15% on real Copilot CLI events; VS Code chat sessions record no cache split, so their estimate can land either side of the bill. percentUsed tracks estimatedCredits while any request is unrated.`
+  return `${rated} of ${rated + unrated} Copilot requests carry GitHub's exact credit figure (Copilot CLI, VS Code agent-host sessions and VS Code chat sessions from Copilot Chat 0.69 on record it). spentCredits counts only those; estimatedCredits adds the rest priced from tokens at listed API rates, which matched GitHub within about 15% on real Copilot CLI events; older VS Code chat sessions record no cache split and only the last model call's prompt, so their estimate can land either side of the bill. percentUsed tracks estimatedCredits while any request is unrated.`
 }
 
 export function projectMonthEnd(

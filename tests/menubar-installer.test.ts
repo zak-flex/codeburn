@@ -6,8 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   buildPersistentCodeburnLookupPath,
   downloadToFile,
+  fetchLatestMacReleaseAssets,
   formatGitHubReleaseLookupError,
   hasRunnableRecordedCli,
+  isFallbackUpgrade,
   isMissingDirectAssetError,
   leftoverBundleLines,
   resolveLatestMenubarReleaseAssets,
@@ -18,9 +20,14 @@ import {
   resolveMenubarReleaseAssets,
   resolvePersistentCodeburnPathFromWhichOutput,
   resolveProxyUrlForUrl,
+  resolveReleaseBase,
   resolveVersionedMenubarReleaseAssets,
   shouldFallbackToReleaseApi,
+  verifyBundleSignature,
   verifyChecksum,
+  MAC_FEED_URL,
+  WINDOWS_RELEASE,
+  type ReleaseApiFetch,
   type ReleaseResponse,
 } from '../src/menubar-installer.js'
 
@@ -797,5 +804,119 @@ describe('leftoverBundleLines', () => {
 
   it('adds a machine-readable twin for the desktop app', () => {
     expect(leftoverBundleLines([path], { CODEBURN_PROGRESS: '1' })[1]).toBe(`CODEBURN_LEFTOVER ${path}`)
+  })
+})
+
+describe('verifyBundleSignature', () => {
+  it('pins the AgentSeal team and asks Gatekeeper before accepting a bundle', async () => {
+    const calls: string[][] = []
+    await verifyBundleSignature('/tmp/x/CodeBurnMenubar.app', async (command, args) => { calls.push([command, ...args]) })
+    expect(calls).toEqual([
+      ['/usr/bin/codesign', '--verify', '--deep', '--strict', '-R=anchor apple generic and certificate leaf[subject.OU] = "XRVP7P7F9M"', '/tmp/x/CodeBurnMenubar.app'],
+      ['/usr/sbin/spctl', '--assess', '--type', 'execute', '/tmp/x/CodeBurnMenubar.app'],
+    ])
+  })
+
+  it('refuses an ad-hoc or foreign signature without running Gatekeeper', async () => {
+    const calls: string[] = []
+    const run = async (command: string) => {
+      calls.push(command)
+      if (command.endsWith('codesign')) throw new Error('/usr/bin/codesign exited with status 3: test-requirement: code failed to satisfy specified code requirement(s)')
+    }
+    await expect(verifyBundleSignature('/tmp/x/CodeBurnMenubar.app', run)).rejects.toThrow(/Refusing to install.*XRVP7P7F9M.*failed to satisfy/)
+    expect(calls).toEqual(['/usr/bin/codesign'])
+  })
+
+  it('refuses a team-signed bundle Gatekeeper rejects (not notarized)', async () => {
+    const run = async (command: string) => {
+      if (command.endsWith('spctl')) throw new Error('/usr/sbin/spctl exited with status 3: rejected')
+    }
+    await expect(verifyBundleSignature('/tmp/x/CodeBurnMenubar.app', run)).rejects.toThrow(/Refusing to install.*rejected/)
+  })
+})
+
+describe('fetchLatestMacReleaseAssets', () => {
+  const zipUrl = 'https://github.com/getagentseal/codeburn/releases/download/mac-v0.9.30/CodeBurnMenubar-v0.9.30.zip'
+  const json = (status: number, body: unknown) => ({ ok: status === 200, status, headers: { get: () => null }, json: async () => body })
+  const scan = [{
+    tag_name: 'mac-v0.9.29',
+    assets: [
+      { name: 'CodeBurnMenubar-v0.9.29.zip', browser_download_url: 'https://example.test/z' },
+      { name: 'CodeBurnMenubar-v0.9.29.zip.sha256', browser_download_url: 'https://example.test/z.sha256' },
+    ],
+  }]
+
+  it('takes the version from the update feed and the assets from that mac-v release', async () => {
+    const urls: string[] = []
+    const fetchImpl: ReleaseApiFetch = async (url) => {
+      urls.push(url)
+      return json(200, { version: '0.9.30', url: zipUrl, sha256: 'ab'.repeat(32) })
+    }
+    const assets = await fetchLatestMacReleaseAssets(fetchImpl)
+    expect(urls).toEqual([MAC_FEED_URL])
+    expect(assets.release.tag_name).toBe('mac-v0.9.30')
+    expect(assets.zip.browser_download_url).toBe(zipUrl)
+    expect(assets.checksum.browser_download_url).toBe(`${zipUrl}.sha256`)
+  })
+
+  it('falls back to the mac-v release scan when the feed is missing', async () => {
+    const fetchImpl: ReleaseApiFetch = async (url) => url === MAC_FEED_URL ? json(404, null) : json(200, scan)
+    const assets = await fetchLatestMacReleaseAssets(fetchImpl)
+    expect(assets.release.tag_name).toBe('mac-v0.9.29')
+  })
+
+  it('never takes a fallback release older than, or equal to, the installed bundle', async () => {
+    // The 0.9.26 release window: CLI 0.9.27 is out, mac-v0.9.27 is not, and the feed still
+    // names 0.9.26 while 0.9.27 was already installed by hand.
+    const feed: ReleaseApiFetch = async () => json(200, {
+      version: '0.9.26',
+      url: 'https://github.com/getagentseal/codeburn/releases/download/mac-v0.9.26/CodeBurnMenubar-v0.9.26.zip',
+    })
+    const assets = await fetchLatestMacReleaseAssets(feed)
+    expect(isFallbackUpgrade(assets, '0.9.27')).toBe(false)
+    expect(isFallbackUpgrade(assets, '0.9.26')).toBe(false)
+    expect(isFallbackUpgrade(assets, '0.9.25')).toBe(true)
+    expect(isFallbackUpgrade(assets, null)).toBe(true)
+    const scanOnly: ReleaseApiFetch = async (url) => url === MAC_FEED_URL ? json(404, null) : json(200, scan)
+    expect(isFallbackUpgrade(await fetchLatestMacReleaseAssets(scanOnly), '0.9.30')).toBe(false)
+    expect(isFallbackUpgrade(await fetchLatestMacReleaseAssets(scanOnly), '0.9.28')).toBe(true)
+    expect(isFallbackUpgrade(resolveVersionedMenubarReleaseAssets('0.9.9', WINDOWS_RELEASE), '0.9.10', WINDOWS_RELEASE)).toBe(false)
+  })
+
+  it('ignores a feed whose url points anywhere but the matching mac-v release asset', async () => {
+    const fetchImpl: ReleaseApiFetch = async (url) => url === MAC_FEED_URL
+      ? json(200, { version: '0.9.30', url: 'https://evil.test/CodeBurnMenubar-v0.9.30.zip' })
+      : json(200, scan)
+    const assets = await fetchLatestMacReleaseAssets(fetchImpl)
+    expect(assets.release.tag_name).toBe('mac-v0.9.29')
+  })
+})
+
+describe('resolveReleaseBase', () => {
+  const DEFAULT = 'https://github.com/getagentseal/codeburn/releases/download'
+
+  it('takes only loopback http with a port or a GitHub releases/download base', () => {
+    expect(resolveReleaseBase('http://127.0.0.1:8787')).toBe('http://127.0.0.1:8787')
+    expect(resolveReleaseBase('https://github.com/someone/codeburn-fork/releases/download')).toBe('https://github.com/someone/codeburn-fork/releases/download')
+  })
+
+  it.each([
+    undefined,
+    '',
+    'https://evil.example',
+    'http://127.0.0.1:8787/',
+    'http://127.0.0.1',
+    'http://127.0.0.1:0',
+    'http://127.0.0.1:70000',
+    'http://localhost:8787',
+    'http://127.0.0.1.evil.example:8787',
+    'https://127.0.0.1:8787',
+    'http://github.com/getagentseal/codeburn/releases/download',
+    'https://github.com.evil.example/a/b/releases/download',
+    'https://github.com/getagentseal/codeburn/releases/download/',
+    'https://github.com/getagentseal/codeburn/releases/download/../../x',
+    'https://github.com/a/b/releases/download?x=1',
+  ])('ignores %s', value => {
+    expect(resolveReleaseBase(value)).toBe(DEFAULT)
   })
 })

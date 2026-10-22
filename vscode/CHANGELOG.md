@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.2
+
+- Bundles CodeBurn CLI 0.9.27.
+
+## 1.0.1
+
+- Bundles CodeBurn CLI 0.9.26: more accurate numbers across tools, Amp and Command Code, and the pull request details.
+- Headline totals carry `~` when more than 1% of the figure is estimated.
+
 ## 1.0.0
 
 First release of the CodeBurn extension for VS Code and its forks.

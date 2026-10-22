@@ -45,6 +45,9 @@ export type CachedCall = {
   /** Present only when workingDirectory came from a dedicated provider field. */
   workingDirectoryProvenance?: 'provider-field'
   workingDirectory?: string
+  /// Claude: the call's raw cwd, stored only when it differs from the previous
+  /// call's in the same parse batch (carried forward like gitBranch).
+  cwd?: string
   toolSequence?: ToolCall[][]
   // Rich-session-capture (capture-only; no report consumes these yet). All
   // optional and omitted at zero/false to keep the per-call cache cost minimal.
@@ -379,7 +382,9 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // byte-identical to a build that omits it (see parser-lineage-capture test).
   // queued-human-prompts-v1: cached turns need to be regrouped around Claude's
   // queued_command prompt attachments, including classification and PR links.
-  claude: 'advisor-usage-v1-skills-rich-capture-v1-cross-provider-pr-v1-session-lineage-capture-v1-queued-human-prompts-v1',
+  // per-call-cwd-v1: cached calls carry their cwd so a session that moved
+  // folders splits across projects per call.
+  claude: 'advisor-usage-v1-skills-rich-capture-v1-cross-provider-pr-v1-session-lineage-capture-v1-queued-human-prompts-v1-per-call-cwd-v1',
   cline: 'worktree-project-grouping-v1',
   // reported-cost-v1: the CLI reports its own per-message cost, so entries
   // cached before cline-cli joined the reported-cost allowlist in parser.ts
@@ -429,13 +434,16 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // auto-review model by date (gpt-5.4 before 30 Jul 2026, Luna after).
   // codex-flex-reserve-v1: flex turns record speed 'flex' (cached calls hold
   // 'standard'), and `gpt-reserve` now splits cache writes like GPT-5.6 Luna.
+  // codex-fork-mask-v1: a fork's replay burst drops only records the parent
+  // rollout holds, so cached forks that dropped the whole burst re-parse.
   // Compose every suffix so cached sessions receive all accounting fixes.
-  codex: 'mcp-attribution-v5-est-cost-active-timing-mcp-wait-rich-capture-v1-cross-provider-pr-v1-session-meta-model-v1-session-meta-fields-v1-codex-pricing-v1-codex-tps-v1-codex-mcp-skills-v1-activity-price-v1-fork-replay-burst-v1-codex-token-usage-record-v1-codex-priority-tier-v1-codex-auto-review-date-v1-codex-flex-reserve-v1',
+  codex: 'mcp-attribution-v5-est-cost-active-timing-mcp-wait-rich-capture-v1-cross-provider-pr-v1-session-meta-model-v1-session-meta-fields-v1-codex-pricing-v1-codex-tps-v1-codex-mcp-skills-v1-activity-price-v1-fork-replay-burst-v1-codex-token-usage-record-v1-codex-priority-tier-v1-codex-auto-review-date-v1-codex-flex-reserve-v1-codex-fork-mask-v1',
   // reported-cost-v1: cached Crush calls stored costUSD: undefined and must
   // re-parse to keep the recorded session cost.
   crush: 'reported-cost-v1',
   // import-guess-est-v1: synced Auto rows with no dollar amount are estimated.
-  cursor: 'composer-anchored-crediting-v1-est-cost-import-guess-est-v1',
+  // full-lookback-v1: a cached parse could be cut at a narrow request's start.
+  cursor: 'composer-anchored-crediting-v1-est-cost-import-guess-est-v1-full-lookback-v1',
   // full-turn-accounting: every assistant message counts as a turn
   // (previously only the first after each user message survived), tool_use
   // inputs join the output text, and input tokens use the full user text
@@ -446,7 +454,9 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // ~/.cursor/chats/*/*/store.db.
   // prompt-time-v1: transcript turns take their prompt's <timestamp> tag, not
   // the session's last write.
-  'cursor-agent': 'workspaceless-transcript-v1-full-turn-accounting-v2-store-db-v1-est-cost-prompt-time-v1',
+  // ide-composer-skip-v1: transcripts of Cursor IDE chats are not read; the
+  // cursor provider counts those chats.
+  'cursor-agent': 'workspaceless-transcript-v1-full-turn-accounting-v2-store-db-v1-est-cost-prompt-time-v1-ide-composer-skip-v1',
   // source-provenance-v1 (#944): CLI sessions were misread as VS Code
   // transcripts (both carry producer 'copilot-agent'), skipping the shutdown
   // input/cache rollup; this bump re-parses them so the missing tokens land.
@@ -487,11 +497,17 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // store-row-output-v1: every session-store row carries its own
   // output_tokens; serve time zeroes it where a per-turn call owns the output.
   // Keys are unchanged, so the re-parse replaces cached output-0 rows in place.
-  copilot: 'cli-shutdown-cost-v1-skills-source-provenance-v1-session-store-v3-chatsession-otel-skills-v1-otel-trace-metadata-once-v1-transcript-unknown-usage-v1-otel-workspace-project-v1-journal-request-input-v1-tokenless-turns-v1-store-row-output-v1',
+  // jetbrains-opus-4-7-v1: JetBrains claude-opus-4.7 turns priced as the
+  // anthropic-auto fallback; cached entries must re-parse once.
+  // chatsession-agent-totals-v1: chat-session requests read every agent round
+  // (modelTotals, root completionTokens) and copilotCredits as nanoAiu.
+  copilot: 'cli-shutdown-cost-v1-skills-source-provenance-v1-session-store-v3-chatsession-otel-skills-v1-otel-trace-metadata-once-v1-transcript-unknown-usage-v1-otel-workspace-project-v1-journal-request-input-v1-tokenless-turns-v1-store-row-output-v1-jetbrains-opus-4-7-v1-chatsession-agent-totals-v1',
   // authoritative-usage-v4: persist one Grok session call from top-level
   // authoritative totals, use modelUsage only for priced attribution, clamp
   // reasoning per record, and label mixed sessions estimated.
-  grok: 'authoritative-usage-v4',
+  // unified-log-v1: per-request usage from logs/unified.jsonl replaces the
+  // session-dir rollup for every session the log holds.
+  grok: 'authoritative-usage-v4-unified-log-v1',
   // Estimated from message text: Grok Bot's local mirror records no tokens.
   // import-guess-est-v1: synced Grok Bot rows with no dollar amount are estimated.
   grokbot: 'estimated-usage-v1-import-guess-est-v1',
@@ -589,7 +605,11 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // sessions without the lineage field gain it. The field is purely
   // additive; every cost / token / call total is byte-identical to a build
   // that omits it.
-  kimicode: 'wire-usage-v1-est-cost-session-lineage-capture-v1',
+  // cwd-project-v1: sessions whose state.json has `cwd` but no `workDir` land
+  // on that folder instead of a path decoded from the wd_ directory name.
+  // tool-sequence-v1: calls carry each tool call's path and shell command, so
+  // optimize sees commits/PRs and retries per file. Costs are unchanged.
+  kimicode: 'wire-usage-v1-est-cost-session-lineage-capture-v1-cwd-project-v1-tool-sequence-v1',
   // archived-subtree-v1: KiloCode shares the SQLite parser and the same schema.
   // billing-routes-v2: its warm cache must move with both shared route fields.
   'kilo-code': 'worktree-project-grouping-v1-session-model-v1-archived-subtree-v1-billing-routes-v2-v2-legacy-union-v1-unknown-usage-v1-vertex-fallback-cost-v1',
@@ -603,7 +623,10 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // cache-read-v1-est-cost: gen_metadata and RPC usage now carry cache-read
   // tokens, fields 9/10 read as thinking/response (they were swapped), and
   // placeholder-only models are priced and flagged costIsEstimated.
-  antigravity: 'worktree-project-grouping-v7-cache-read-v1-est-cost',
+  // model-fallback-v1: gen_metadata without usage.model falls back to
+  // chatModel.model instead of dropping the session, Gemini 3.8 Flash
+  // placeholders resolve, and Gemini 3 Flash -a/-d rows are priced.
+  antigravity: 'worktree-project-grouping-v7-cache-read-v1-est-cost-model-fallback-v1',
   // pr-attribution-v1: the parser now reads the `message`/`part` tables for
   // per-turn user prompt text and the GitHub PR URLs it references. Cached
   // ZCode sessions hold empty userMessage turns and no session prLinks, so
@@ -1188,6 +1211,7 @@ function validateCall(c: unknown): c is CachedCall {
     && isOptionalString(o['projectPath'])
     && (o['workingDirectoryProvenance'] === undefined || o['workingDirectoryProvenance'] === 'provider-field')
     && isOptionalString(o['workingDirectory'])
+    && isOptionalString(o['cwd'])
     && (o['toolSequence'] === undefined || (Array.isArray(o['toolSequence']) && (o['toolSequence'] as unknown[]).every(s => isToolCallArray(s))))
     && isOptionalNum(o['locAdded'])
     && isOptionalNum(o['locRemoved'])

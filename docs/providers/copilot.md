@@ -28,7 +28,16 @@ Microsoft 365 Copilot (Office, Teams) and Copilot in the browser are not support
 
 JSONL in the first three locations (schemas differ; the parser switches by source type / event shape), a SQLite DB for the OTel source, and a Nitrite (H2 MVStore) `.db` for the JetBrains source. VS Code core chat sessions use a delta journal: `kind:0` sets the root object, `kind:1` writes a value at path `k`, and `kind:2` appends items to an array path.
 
-Core chat-session journals read input from `result.metadata.promptTokens`, falling back to the request's `promptTokens` when metadata has no positive count. Output keeps the existing `result.metadata.outputTokens` then request `completionTokens` precedence. These fields are alternatives, never summed. Input-only requests count; rows without reported usage remain skipped rather than estimated from text. The request-level prompt count is the value VS Code recorded, not a reconstructed total across an agent loop's model calls.
+An agent-mode request makes one model call per tool round. In Copilot Chat 0.69 (VS Code 1.141) `result.metadata.promptTokens` and `outputTokens` describe only the last of those calls, while the request itself carries the whole request: `completionTokens` (output summed over every call), `modelTotals` (per model `inputTokens`, `cachedTokens`, `outputTokens`, summed over every call) and `copilotCredits` (GitHub's billed `total_nano_aiu / 1e9`, subagents included). Core chat sessions, journal and legacy JSON alike, read each request in this order:
+
+1. `modelTotals`, summed over its models: output, cache reads from `cachedTokens`, and input without the cached part (the Copilot engine counts cached tokens inside `inputTokens`; an input below the cached count is taken as already uncached).
+2. Otherwise output from the request's `completionTokens`, then `result.metadata.outputTokens`; input from `result.metadata.promptTokens`, then the request's `promptTokens`. Both prompt fields hold the last call only, and there is no cache split, so input of a multi-round request without `modelTotals` stays undercounted.
+
+The fields are alternatives, never summed. `copilotCredits` rides as `nanoAiu`, exactly like the agent host's `totalNanoAiu`, so plan credits for these requests are exact, and it sets the request's cost to the bill (credits × $0.01, kept through the cache as a billed cost) because the last-round prompt cannot price it. Requests without `copilotCredits` stay priced from the tokens above. VS Code fills `copilotCredits` from GitHub's `total_nano_aiu` on the extension path, but for an agent-host turn without that figure it falls back to the agent's own `_meta.cost`. The saved request does not say which one it holds. VS Code 1.141 saves full requests only for local sessions, which take the `total_nano_aiu` path, so the figure is treated as the bill; a saved request from the fallback would be priced as if it were.
+
+A chat session that also ran on the agent host is counted once, from the agent host. At serve time, a journal request is left out when a session with exactly the same id has billed usage on the agent-host side: a session-state `events.jsonl` call with tokens or `nanoAiu`, or a session-store row. A session-state file with no usage yet keeps the journal. VS Code 1.141 does not save agent-host sessions as full journals (only an index entry), so this guards a shape not seen on real data.
+
+In plan credits, a chat-session request is rated on its own: a request with `copilotCredits` counts as exact, one without keeps its token estimate, so a session spanning the Copilot Chat 0.69 upgrade is not billed whole. `sessionCopilotCredits` is a running session total and is not read. `result.metadata.summaries[]` holds only compaction text (`toolCallRoundId`, `text`); compaction usage reaches the request's own usage fields, so it adds nothing. Input-only and credits-only requests count; rows without reported usage remain skipped rather than estimated from text.
 
 ## VS Code agent host (Copilot CLI engine)
 
@@ -197,9 +206,10 @@ see the #927 ruling in `src/session-cache.ts`).
   Copilot AI credits (`codeburn plan set copilot-pro`). Billing-grade cost
   rewrite of every report is still upstream #890.
 
-  These CLI session-store rows and the `session.shutdown` rollup's
-  `totalNanoAiu` (CLI and VS Code agent host) are the only local sources that
-  carry an exact credit figure. VS Code chat sessions and transcripts, the OTel
+  These CLI session-store rows, the `session.shutdown` rollup's
+  `totalNanoAiu` (CLI and VS Code agent host) and `copilotCredits` on VS Code
+  chat-session requests (Copilot Chat 0.69 on) are the only local sources that
+  carry an exact credit figure. Older chat sessions, transcripts, the OTel
   `agent-traces.db` and JetBrains stores never do,
   so on a typical machine most requests have no exact figure at all (#1199).
   Everything unrated is estimated instead: the request's tokens priced at the
@@ -209,7 +219,7 @@ see the #927 ruling in `src/session-cache.ts`).
   (the legacy premium-request weight) never touches the credit figure. So the
   estimate's accuracy hinges on the source: on Copilot CLI events, which carry
   the cache split, CodeBurn's token pricing landed within about 15% of the
-  exact bill; VS Code chat sessions record prompt and output tokens only, so
+  exact bill; older VS Code chat sessions record prompt and output tokens only, so
   their estimate can land either side of the bill, and the numbers in #1199
   show the gap can reach roughly 2x. A session that carries any exact figure
   is never estimated on top of, because `total_nano_aiu` already bills that

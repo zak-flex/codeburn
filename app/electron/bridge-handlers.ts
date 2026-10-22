@@ -4,11 +4,12 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { CliError, DESKTOP_COLD_TIMEOUT_MS, PROGRESS_LINE_PREFIX, type ActionResult, type SpawnPriority } from './cli'
+import type { CompanionUpdateStatus } from './companion-update'
 import type { CompanionStatus, MenubarCompanion } from './menubar'
 import { NO_MAC_MENUBAR, type MacMenubar } from './mac-menubar'
 import { readOptimizeSnapshot, sameLocalDay, writeOptimizeSnapshot, type OptimizeBlock, type OptimizeSnapshot } from './optimize-store'
 import { sanitizeError, type getQuota } from './quota'
-import type { Telemetry } from './telemetry'
+import { cliErrorReason, durationBucket, type Telemetry } from './telemetry'
 import type { UpdateStatus } from './updates'
 
 // The IPC bridge's channel -> argv mapping, free of any `electron` import so a
@@ -30,7 +31,7 @@ export const NO_UPDATE_STATUS: UpdateStatus = { currentVersion: '', latestVersio
 
 // Result envelope: handlers never throw across IPC so the structured error
 // `kind` survives contextBridge serialization. preload.ts unwraps it.
-export type Envelope<T = unknown> = { ok: true; value: T } | { ok: false; error: { kind: string; message: string; cold?: true } }
+export type Envelope<T = unknown> = { ok: true; value: T } | { ok: false; error: { kind: string; message: string; cold?: true; stage?: string } }
 
 // The first overview fetch after boot hydrates a cold cache from scratch (a full
 // history parse). That can far exceed the 45s read timeout, and killing it means
@@ -65,6 +66,14 @@ function providerArgs(provider: string | undefined): string[] {
 export type ProjectFilter = { project: string[]; exclude: string[] }
 
 const EMPTY_PROJECT_FILTER: ProjectFilter = { project: [], exclude: [] }
+
+/**
+ * The saved project filter narrowed to these paths. Its excludes still apply;
+ * its includes give way, since the paths already name the projects shown.
+ */
+export function scopeFilter(paths: readonly string[]): (filter: ProjectFilter) => ProjectFilter {
+  return filter => paths.length === 0 ? filter : { project: [...paths], exclude: filter.exclude }
+}
 
 // A file rather than a build-time constant so it toggles without rebuilding,
 // and it lives here, not in renderer storage, because this is where the argv is
@@ -380,10 +389,12 @@ function priceOverrideArgs(model: string, rates: PriceRates | undefined): string
   ]
 }
 
-function toEnvelopeError(err: unknown): { kind: string; message: string } {
-  if (err instanceof CliError) return { kind: err.kind, message: sanitizeError(err.message) }
+function toEnvelopeError(err: unknown): { kind: string; message: string; stage?: string } {
+  if (err instanceof CliError) return { kind: err.kind, message: sanitizeError(err.message), ...(err.kind === 'not-found' && err.detail ? { stage: err.detail } : {}) }
   return { kind: 'nonzero', message: sanitizeError(err instanceof Error ? err.message : String(err)) }
 }
+
+const PROVIDER_ISSUE_KINDS = new Set(['eacces', 'busy', 'enoent', 'malformed', 'error'])
 
 /**
  * Props for a `cli_error` telemetry event. Deliberately carries only
@@ -391,14 +402,21 @@ function toEnvelopeError(err: unknown): { kind: string; message: string } {
  * nothing: `cmd` is the CLI subcommand (argv[0], a fixed literal like 'status'/
  * 'sessions' — never the full args, which can hold paths), and `detail` is the
  * not-found resolution/spawn stage. The error's `message` (which may contain a
- * path or stderr) is never read here — only `kind` and the stage enum are.
+ * path or stderr) only ever reaches cliErrorReason, which reduces it to a fixed
+ * label. `ms` is a duration bucket, `exit` a one-shot child's exit code or
+ * signal name, and `provider` appears only when the read was scoped to one.
  */
-function cliErrorProps(err: unknown, cmd: string | undefined): Record<string, unknown> {
-  const props: Record<string, unknown> = {}
+function cliErrorProps(err: unknown, argv: readonly string[] | undefined, startedAt: number): Record<string, unknown> {
+  const props: Record<string, unknown> = { ms: durationBucket(Date.now() - startedAt) }
+  const cmd = argv?.[0]
   if (cmd) props.cmd = cmd
+  const providerAt = argv ? argv.indexOf('--provider') : -1
+  if (providerAt >= 0 && argv![providerAt + 1]) props.provider = argv![providerAt + 1]
   if (err instanceof CliError) {
     props.kind = err.kind
     if (err.kind === 'not-found' && err.detail) props.detail = err.detail
+    if (err.exit !== undefined) props.exit = err.exit
+    if (err.kind === 'nonzero') props.reason = cliErrorReason(err.message)
   } else {
     props.kind = 'nonzero'
   }
@@ -416,6 +434,13 @@ export type Deps = {
   telemetry?: TelemetryBridge | null
   /** Cached update-availability status; absent under tests unless injected. */
   getUpdateStatus?: () => Promise<UpdateStatus>
+  /** One-click update download and restart; absent where updates are a download link. */
+  downloadUpdate?: () => Promise<UpdateStatus>
+  installUpdate?: () => void
+  /** The menubar app and global CLI against the desktop's version; null until the first check. */
+  companionUpdateStatus?: () => CompanionUpdateStatus | null
+  /** Run the companion update; progress arrives on the push channel. */
+  updateCompanions?: () => unknown
   /** The bundled tray app and Capacity Dock; absent off Windows and under tests. */
   companion?: Pick<
     MenubarCompanion,
@@ -468,11 +493,34 @@ export function exportedPath(stdout: string): string | null {
 
 export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
   const emitProgress = deps.emitProgress ?? (() => {})
-  const projectArgs = (): string[] => {
+  const savedFilter = (): ProjectFilter => {
     const filter = readProjectFilter()
-    return filterArgs(deps.scopeProjectFilter ? deps.scopeProjectFilter(filter) : filter)
+    return deps.scopeProjectFilter ? deps.scopeProjectFilter(filter) : filter
+  }
+  // The top bar's project pick. Held in memory only, so a restart is back on
+  // every project and the saved filter is never touched.
+  let transientProject: string | null = null
+  const projectArgs = (): string[] => {
+    const filter = savedFilter()
+    // "=": the picked row alone, not the folders under it that are rows of their own.
+    return filterArgs(transientProject ? scopeFilter([`=${transientProject}`])(filter) : filter)
   }
   const telemetry = deps.telemetry ?? null
+  // The CLI lists providers it could not read on the payload; forwarded as enums only,
+  // and the telemetry budget keeps it to one per provider per day.
+  const trackProviderIssues = <T>(payload: T): T => {
+    const issues = (payload as { providerIssues?: unknown } | null)?.providerIssues
+    if (Array.isArray(issues)) {
+      for (const issue of issues.slice(0, 50)) {
+        const { provider, stage, kind } = (issue ?? {}) as Record<string, unknown>
+        if (typeof provider !== 'string' || !/^[a-z0-9-]{1,40}$/.test(provider)) continue
+        if (stage !== 'locate' && stage !== 'parse') continue
+        if (typeof kind !== 'string' || !PROVIDER_ISSUE_KINDS.has(kind)) continue
+        telemetry?.track('provider_read_fail', { provider, stage, kind })
+      }
+    }
+    return payload
+  }
   // Flips true after the first overview fetch succeeds. Until then, every
   // overview fetch runs cold (long timeout + progress streaming); the shared
   // spawnCli coalescing means concurrent same-arg re-polls join one child.
@@ -507,18 +555,18 @@ export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
   const bootedAt = Date.now()
   const stillCold = (): boolean =>
     !overviewWarmed && Date.now() - (coldStartBegan ?? bootedAt) < WARMUP_TIMEOUT_MS
-  const coldError = (err: unknown): { kind: string; message: string; cold?: true } => {
+  const coldError = (err: unknown): { kind: string; message: string; cold?: true; stage?: string } => {
     const error = toEnvelopeError(err)
     return stillCold() && error.kind === 'timeout' ? { ...error, cold: true } : error
   }
 
   const run = (build: (...args: any[]) => string[], backgroundIndex?: number): Handler => async (...args: any[]) => {
-    let cmd: string | undefined
+    let argv: string[] | undefined
+    const startedAt = Date.now()
     try {
       const background = backgroundIndex !== undefined && args[backgroundIndex] === true
       // `background` is renderer scheduling metadata, not a CLI argument.
-      const argv = build(...(backgroundIndex === undefined ? args : args.slice(0, backgroundIndex)))
-      cmd = argv[0]
+      argv = build(...(backgroundIndex === undefined ? args : args.slice(0, backgroundIndex)))
       const baseOpts = readOpts()
       return {
         ok: true,
@@ -528,7 +576,7 @@ export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
       }
     } catch (err) {
       const error = coldError(err)
-      telemetry?.track('cli_error', cliErrorProps(err, cmd))
+      telemetry?.track('cli_error', cliErrorProps(err, argv, startedAt))
       return { ok: false, error }
     }
   }
@@ -589,6 +637,7 @@ export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
       const now = Date.now()
       if (cached && now - computedAt < maxAge && sameLocalDay(computedAt, now)) return { ok: true, value: cached }
     }
+    const startedAt = Date.now()
     try {
       // Background priority, which only applies to the one-shot fallback path:
       // a serve-routed command (this one is `status`) is dispatched before
@@ -605,7 +654,7 @@ export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
       return { ok: true, value: snapshot }
     } catch (err) {
       const error = coldError(err)
-      telemetry?.track('cli_error', cliErrorProps(err, 'status'))
+      telemetry?.track('cli_error', cliErrorProps(err, argv, startedAt))
       return { ok: false, error }
     }
   }
@@ -616,15 +665,17 @@ export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
   const getOverview: Handler = async (period: string, provider: string, range?: DateRange, configSource?: string | null, background?: boolean, scope?: string) => {
     coldStartBegan ??= Date.now()
     const priority: SpawnPriority | undefined = background ? 'background' : undefined
+    const startedAt = Date.now()
+    let args: string[] | undefined
     try {
-      const args = buildOverviewArgs(period, provider, range, configSource, scope)
-      if (overviewWarmed) return { ok: true, value: await deps.spawnCli(args, priority ? { priority } : undefined) }
-      const value = await deps.spawnCli(args, {
+      args = buildOverviewArgs(period, provider, range, configSource, scope)
+      if (overviewWarmed) return { ok: true, value: trackProviderIssues(await deps.spawnCli(args, priority ? { priority } : undefined)) }
+      const value = trackProviderIssues(await deps.spawnCli(args, {
         timeoutMs: WARMUP_TIMEOUT_MS,
         extraEnv: { CODEBURN_PROGRESS: '1' },
         onStderr: makeProgressReader(emitProgress),
         ...(priority ? { priority } : {}),
-      })
+      }))
       overviewWarmed = true
       emitProgress({ kind: 'done' })
       emitColdStart(false)
@@ -632,7 +683,7 @@ export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
     } catch (err) {
       const error = coldError(err)
       if (!overviewWarmed) emitColdStart(error.kind === 'timeout')
-      telemetry?.track('cli_error', cliErrorProps(err, 'status'))
+      telemetry?.track('cli_error', cliErrorProps(err, args ?? ['status'], startedAt))
       return { ok: false, error }
     }
   }
@@ -785,6 +836,15 @@ export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
       try { return { ok: true, value: readProjectFilter() } }
       catch (error) { return { ok: false, error: toEnvelopeError(error) } }
     },
+    // An absolute path only, or the temporary-folders row: a bare name would be
+    // a substring pattern and could take in every project sharing it.
+    'codeburn:setTransientProject': async (projectPath?: unknown) => {
+      if (projectPath !== null && projectPath !== '@temp' && (typeof projectPath !== 'string' || !path.isAbsolute(projectPath) || projectPath.includes('\0'))) {
+        return { ok: false, error: { kind: 'bad-args', message: 'invalid project path' } }
+      }
+      transientProject = projectPath
+      return { ok: true, value: undefined }
+    },
     'codeburn:setProjectFilter': async (filter?: unknown) => {
       try { return { ok: true, value: writeProjectFilter(filter) } }
       catch (error) { return { ok: false, error: { kind: 'nonzero', message: sanitizeError(error) } } }
@@ -838,7 +898,7 @@ export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
       try {
         const result = await deps.spawnCliAction([
           'export', '-f', vToken(format), '-o', vOutPath(outPath), '--provider', vProvider(provider),
-          ...projectArgs(),
+          ...filterArgs(savedFilter()),
         ])
         const savedPath = exportedPath(result.stdout)
         if (result.ok && savedPath === null) {
@@ -865,6 +925,16 @@ export function createBridgeHandlers(deps: Deps): Record<string, Handler> {
     // One-shot read of the cached update-availability status. The check itself
     // runs in the background (launch + 24h); this returns whatever is known.
     'codeburn:getUpdateStatus': async () => ({ ok: true, value: deps.getUpdateStatus ? await deps.getUpdateStatus() : NO_UPDATE_STATUS }),
+    'codeburn:downloadUpdate': async () => ({ ok: true, value: deps.downloadUpdate ? await deps.downloadUpdate() : NO_UPDATE_STATUS }),
+    'codeburn:installUpdate': async () => {
+      deps.installUpdate?.()
+      return { ok: true, value: true }
+    },
+    'codeburn:companionUpdateStatus': async () => ({ ok: true, value: deps.companionUpdateStatus?.() ?? null }),
+    'codeburn:updateCompanions': async () => {
+      void deps.updateCompanions?.()
+      return { ok: true, value: true }
+    },
     // The bundled tray app and its Capacity Dock (Windows). Every setter answers with the
     // whole status, so the sidebar renders the state that actually took rather than the one
     // it asked for: an install that was cancelled leaves the switch where it was.

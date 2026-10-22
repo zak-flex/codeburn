@@ -166,7 +166,7 @@
 "Update Check Failed" = "Update Check Failed";
 "CLI Update Failed" = "CLI Update Failed";
 "Menubar Update Failed" = "Menubar Update Failed";
-"CodeBurn could not check GitHub for updates." = "CodeBurn could not check GitHub for updates.";
+"CodeBurn could not check for updates." = "CodeBurn could not check for updates.";
 "CodeBurn could not update the CLI." = "CodeBurn could not update the CLI.";
 "CodeBurn could not update the menubar app." = "CodeBurn could not update the menubar app.";
 "Click to retry the update check." = "Click to retry the update check.";
@@ -174,12 +174,20 @@
 "Updating..." = "Updating...";
 "Update" = "Update";
 "Update the CLI and menubar to the latest release" = "Update the CLI and menubar to the latest release";
+"Desktop Update Failed" = "Desktop Update Failed";
+"CodeBurn could not update the desktop app." = "CodeBurn could not update the desktop app.";
+"Updating CLI..." = "Updating CLI...";
+"Updating menubar..." = "Updating menubar...";
+"Opening CodeBurn to update..." = "Opening CodeBurn to update...";
+"Update the CLI, menubar and desktop app to the latest release" = "Update the CLI, menubar and desktop app to the latest release";
 "CodeBurn %@ available" = "CodeBurn %@ available";
 "App and CLI %@ updates are ready. Click to install." = "App and CLI %@ updates are ready. Click to install.";
 "Click to install the update." = "Click to install the update.";
 "CodeBurn CLI %@ available" = "CodeBurn CLI %@ available";
 "Could not find the package manager for %1$@. Run “%2$@” manually, then try again." = "Could not find the package manager for %1$@. Run “%2$@” manually, then try again.";
 "the CLI" = "the CLI";
+"This codeburn CLI comes with the CodeBurn desktop app. Update the desktop app, then try again." = "This codeburn CLI comes with the CodeBurn desktop app. Update the desktop app, then try again.";
+"npm does not have permission to update the global codeburn install. Run “%@” in Terminal, then try again." = "npm does not have permission to update the global codeburn install. Run “%@” in Terminal, then try again.";
 "CLI update failed (exit %lld)" = "CLI update failed (exit %lld)";
 "Your codeburn CLI (%1$@) is too old to update the menubar. Run “%2$@” first, then try again." = "Your codeburn CLI (%1$@) is too old to update the menubar. Run “%2$@” first, then try again.";
 "Update failed (exit %lld)" = "Update failed (exit %lld)";
@@ -222,9 +230,6 @@
 "%1$@ over limit (%2$lld%%)" = "%1$@ over limit (%2$lld%%)";
 "resets in %@" = "resets in %@";
 "Change accent color" = "Change accent color";
-"CLI %@ available" = "CLI %@ available";
-"Update now" = "Update now";
-"Update the CLI (and the menubar if one is available) automatically" = "Update the CLI (and the menubar if one is available) automatically";
 "Copy update command to clipboard" = "Copy update command to clipboard";
 "Enjoying CodeBurn?" = "Enjoying CodeBurn?";
 "Star us on GitHub" = "Star us on GitHub";
@@ -616,6 +621,7 @@
 "This credential predates a live CodeBurn quota adapter and is not treated as a connection." = "This credential predates a live CodeBurn quota adapter and is not treated as a connection.";
 "Quota adapter not available" = "Quota adapter not available";
 "Retrying" = "Retrying";
+"Cline login expired" = "Cline login expired";
 "%@ is catalogued, but CodeBurn cannot fetch its live quota yet." = "%@ is catalogued, but CodeBurn cannot fetch its live quota yet.";
 "Live quota is available to Capacity Dock." = "Live quota is available to Capacity Dock.";
 "Waiting for quota data." = "Waiting for quota data.";
