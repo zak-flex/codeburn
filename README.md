@@ -49,6 +49,12 @@
 > build from source and connect LiteLLM. This page and that file are
 > fork-only and are not part of upstream CodeBurn.
 
+> **Installing from this fork?** The npm / brew / `npx` lines below install the
+> published (upstream) package, which does not include this fork's LiteLLM
+> Proxy provider. Follow **[docs/FLEX-INSTALL.md](docs/FLEX-INSTALL.md)** to
+> build from source and connect LiteLLM. This page and that file are
+> fork-only and are not part of upstream CodeBurn.
+
 ## The problem
 
 Your bill gives you a month total. It does not break that down by project, by model or by task, and it does not show which part of it was wasted.
